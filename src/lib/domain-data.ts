@@ -3,7 +3,9 @@ import type { Dataset, Json, JsonObject, Language, SlotDefinition } from "./type
 export const object = (value: Json | undefined): JsonObject => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 export const array = (value: Json | undefined): Json[] => Array.isArray(value) ? value : [];
 export const string = (value: Json | undefined): string => value == null ? "" : String(value);
-export const localized = (language: Language, ru: string, kk: string): string => language === "kk" ? kk : ru;
+// Mixed wording is supplied explicitly for reviewed short prompts; this helper
+// does not attempt automatic translation or alter dynamic amounts and conditions.
+export const localized = (language: Language, ru: string, kk: string, mixed?: string): string => language === "kk" ? kk : language === "mixed" ? mixed ?? ru : ru;
 export const present = (value: Json | undefined): boolean => value !== undefined && value !== null && value !== "" && (!Array.isArray(value) || value.length > 0);
 
 export class DomainError extends Error {

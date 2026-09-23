@@ -2,13 +2,17 @@ import { randomUUID } from "node:crypto";
 import type { ActionResult, Dataset, EntityStore, Json, JsonObject, Scenario } from "./types";
 import { addDays, addMonths, array, calculatePrice, DomainError, lookupKnowledge, mask, object, policyStatus, productForScenario, regionFromPlate, requireActive, string } from "./domain-data";
 
-export type ActionContext = { dataset: Dataset; store: EntityStore; scenario: Scenario; slots: JsonObject; clientId: string | null; sessionId: string; requestId: string; preview: boolean };
+export type ActionContext = { dataset: Dataset; store: EntityStore; scenario: Scenario; slots: JsonObject; clientId: string | null; sessionId: string; requestId: string; preview: boolean; text?: string };
 export type ActionPlan = { results: ActionResult[]; writes: { kind: string; id: string; value: JsonObject }[]; facts: JsonObject; clientId: string | null; handoff?: { queue: string; reason: string }; warnings: string[] };
 export const MUTATING_ACTIONS = new Set(["create_policy", "renew_policy", "update_policy", "cancel_policy", "create_claim", "create_dispute", "book_inspection", "book_appointment", "update_contact", "resend_documents", "request_document", "send_sms", "create_callback", "create_complaint", "report_fraud", "transfer_to_operator"]);
 
 const prefixes: Record<string, string> = { ogpo: "OGPO", casco: "CASCO", travel: "TRVL", property: "PROP", accident: "NS", dms: "DMS" };
 const statusNames: Record<string, string> = { active: "действует", expired: "срок истёк", not_yet_active: "ещё не вступил в силу", cancelled: "расторгнут", pending_payment: "ожидает оплаты", paid: "выплата произведена", approved: "выплата одобрена", documents_requested: "ожидаются документы", under_review: "на рассмотрении", registered: "зарегистрирован" };
 export const statusLabel = (status: Json | undefined): string => statusNames[string(status)] ?? string(status);
+
+// This is an outcome of standard app-help steps inside an already selected SC34,
+// never a phrase-to-scenario router. Persist its result in the confirmation snapshot.
+export const appHelpFailed = (text: string): boolean => /не\s+помог|не\s+сработал|всё\s+ещ[её]\s+не|әлі\s+де\s+(?:болмай|кірмей|жұмыс\s+істеме)|көмектесп|still\s+(?:not|can(?:not|'t)|doesn['’]t|does\s+not|fail)/iu.test(text);
 
 export async function planActions(context: ActionContext): Promise<ActionPlan> {
   const { dataset, scenario, sessionId, requestId, preview } = context;
@@ -261,7 +265,7 @@ export async function planActions(context: ActionContext): Promise<ActionPlan> {
           || (id === "SC14" && /пострада|injur|зардап|жарақат/.test(allText))
           || (id === "SC30" && object(facts.check_payment).payment_status === "charged_policy_not_issued")
           || (id === "SC38" && /сообщил|передал|назвал.*код|shared|айттым|жібердім/.test(allText))
-          || (id === "SC34" && /не помог|still|көмектесп/.test(allText));
+          || (id === "SC34" && (slots.__app_help_failed === true || appHelpFailed(context.text ?? "")));
         if (should && !handoff) { handoff = { queue: scenario.handoff?.queue ?? "operator_general", reason: scenario.name }; record(name, { queue: handoff.queue, status: "waiting", note: "Request queued for an authenticated supervisor; live telephony transfer is not connected." }, "queued"); }
         break;
       }

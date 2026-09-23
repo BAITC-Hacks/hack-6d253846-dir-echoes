@@ -1,4 +1,5 @@
 import { normalizeSlot } from "./domain-data";
+import { effectiveSlots } from "./routing-slots";
 import type { Dataset, DialogueState, Json, Language, RouterOutput, SlotDefinition } from "./types";
 
 // Complete slot labels, never utterance-to-scenario rules. All targets must also
@@ -112,7 +113,7 @@ export function tryFastPath({ dataset, state, text, responseLanguage = state.lan
       : confirmation === "confirm" ? "Точное подтверждение показанного действия." : "Точный отказ от показанного действия.";
   } else {
     if (!state.lastQuestionSlot) return null;
-    const definition = dataset.slots.find(slot => slot.name === state.lastQuestionSlot);
+    const definition = effectiveSlots(dataset).find(slot => slot.name === state.lastQuestionSlot);
     if (!definition) return null;
     const normalized = atomicValue(definition, value, dataset.businessDate);
     if (normalized === undefined) return null;

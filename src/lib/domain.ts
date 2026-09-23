@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ActionResult, DialogueState, ExecuteInput, ExecuteOutput, Json, JsonObject, Scenario } from "./types";
-import { MUTATING_ACTIONS, planActions, statusLabel, type ActionPlan } from "./domain-actions";
+import { appHelpFailed, MUTATING_ACTIONS, planActions, statusLabel, type ActionPlan } from "./domain-actions";
 import { array, DomainError, localized, lookupKnowledge, mask, normalizeSlot, object, policyStatus, present, productForScenario, regionFromPlate, string } from "./domain-data";
+import { effectiveSlots } from "./routing-slots";
 
 export function initialState(): DialogueState {
   return { language: "ru", activeScenarioId: null, pendingScenarioIds: [], suspendedScenarioIds: [], completedScenarioIds: [], slots: {}, slotsByScenario: {}, clientId: null, pendingConfirmation: null, unclearCount: 0, lastQuestionSlot: null, lookupFailures: 0, status: "active" };
@@ -10,12 +11,25 @@ export function initialState(): DialogueState {
 const identitySlots = ["phone", "iin", "policy_number", "claim_number"];
 const actionDependencies: Record<string, string[]> = { SC01: ["term_months"], SC02: ["region", "vehicle_type", "term_months"], SC03: ["package"], SC06: ["phone"], SC12: ["policy_number"], SC26: ["policy_number"], SC27: ["product_type"] };
 const prices = ["calc_ogpo_price", "calc_casco_price", "calc_travel_price", "calc_property_price", "calc_accident_price"];
+const mixedSlotQuestions: Record<string, string> = {
+  region: "Көлік қай қалада зарегистрирован?",
+  vehicle_type: "Бұл легковой автомобиль ме?",
+  phone: "Телефон нөміріңізді подскажите, пожалуйста.",
+  iin: "ЖСН-іңізді назовите, пожалуйста.",
+  policy_number: "Номер полиса қолыңызда болса, айтып жіберіңізші.",
+  claim_number: "Номер заявления айтып жіберіңізші.",
+  drivers_iin: "Кім жүргізеді? Назовите ЖСН каждого водителя.",
+  city: "Подскажите, қай қаладасыз?",
+  package: "Қай бағдарламаны таңдайсыз: Standard или Lite?",
+  term_months: "Қай срок керек: 6 или 12 месяцев?",
+};
 
 function allowedSlots(scenario: Scenario): Set<string> { return new Set([...scenario.slots.required, ...scenario.slots.optional, ...identitySlots, "product_type", ...(actionDependencies[scenario.scenario_id] ?? [])]); }
 
 function defaultQuestion(input: ExecuteInput, state: DialogueState, slot: string): string {
-  const def = input.dataset.slots.find(s => s.name === slot);
-  return def?.prompt[state.language === "kk" ? "kk" : "ru"] ?? localized(state.language, "Уточните недостающие данные.", "Жетіспейтін деректерді нақтылаңыз.");
+  const def = effectiveSlots(input.dataset).find(s => s.name === slot);
+  if (def && state.language === "mixed" && mixedSlotQuestions[slot]) return mixedSlotQuestions[slot];
+  return def?.prompt[state.language === "kk" ? "kk" : "ru"] ?? localized(state.language, "Уточните недостающие данные.", "Жетіспейтін деректерді нақтылаңыз.", "Уточните, пожалуйста, жетіспейтін деректерді.");
 }
 
 function safeSlots(slots: JsonObject): JsonObject {
@@ -73,8 +87,8 @@ function fallbackReply(scenario: Scenario, plan: ActionPlan, state: DialogueStat
   const quote = plan.results.find(a => prices.includes(a.name));
   if (plan.handoff) {
     const manual = object(plan.facts.manual_fulfillment);
-    if (manual.request_id) return localized(lang, `Запрос ${manual.request_id} сохранён и передан специалисту для согласования. Время и внешнее исполнение ещё не подтверждены.`, `${manual.request_id} сұранысы сақталып, келісу үшін маманға берілді. Уақыт пен сыртқы орындалу әлі расталған жоқ.`);
-    return localized(lang, "Запрос и контекст сохранены в очереди специалиста. Оператор сможет продолжить разговор здесь.", "Сұраныс пен контекст маман кезегінде сақталды. Оператор әңгімені осы жерде жалғастыра алады.");
+    if (manual.request_id) return localized(lang, `Запрос ${manual.request_id} сохранён и передан специалисту для согласования. Время и внешнее исполнение ещё не подтверждены.`, `${manual.request_id} сұранысы сақталып, келісу үшін маманға берілді. Уақыт пен сыртқы орындалу әлі расталған жоқ.`, `Запрос ${manual.request_id} сохранён и передан специалисту для согласования. Уақыт пен сыртқы орындалу әлі расталған жоқ.`);
+    return localized(lang, "Запрос и контекст сохранены в очереди специалиста. Оператор сможет продолжить разговор здесь.", "Сұраныс пен контекст маман кезегінде сақталды. Оператор әңгімені осы жерде жалғастыра алады.", "Запрос и контекст сохранены в очереди специалиста. Оператор әңгімені осы жерде жалғастыра алады.");
   }
   switch (scenario.scenario_id) {
     case "SC01": case "SC03": case "SC07": case "SC08": return localized(lang, `Стоимость по условиям программы — ${quote?.data.price} тенге. Расчёт сохранён в истории разговора.`, `Бағдарлама шарттары бойынша құны — ${quote?.data.price} теңге. Есеп әңгіме тарихында сақталды.`);
@@ -155,9 +169,10 @@ function complete(state: DialogueState, scenario: Scenario): void {
 
 export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
   const state = structuredClone(input.state), { dataset, decision, store } = input;
+  const slotDefinitions = effectiveSlots(dataset);
   state.language = decision.responseLanguage ?? (decision.language === "mixed" ? (input.state.language === "kk" ? "kk" : "ru") : decision.language);
   const output: ExecuteOutput = { state, actions: [], reply: "", facts: {}, warnings: [] };
-  const text = (ru: string, kk: string) => localized(state.language, ru, kk);
+  const text = (ru: string, kk: string, mixed?: string) => localized(state.language, ru, kk, mixed);
   const handoff = (queue: string, reason: string, authorized = false): ExecuteOutput => {
     const selectedQueue = dataset.queues.includes(queue) ? queue : "operator_general";
     if (!authorized) {
@@ -172,13 +187,13 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
       state.pendingConfirmation = { id: randomUUID(), scenarioId: "SC37", actionNames: ["transfer_to_operator"], slots: snapshot, summary, createdAt: new Date().toISOString() };
       output.actions.push({ name: "transfer_to_operator", status: "preview", data: { queue: selectedQueue } });
       output.facts = { ...output.facts, confirmation_required: true, proposed_queue: selectedQueue };
-      output.reply = text("Могу передать запрос и контекст специалисту. Подтверждаете?", "Сұраныс пен контекстті маманға бере аламын. Растайсыз ба?");
+      output.reply = text("Могу передать запрос и контекст специалисту. Подтверждаете?", "Сұраныс пен контекстті маманға бере аламын. Растайсыз ба?", "Могу передать запрос и контекст специалисту. Растайсыз ба?");
       return output;
     }
     state.status = "handoff"; state.pendingConfirmation = null;
     output.handoff = { queue: selectedQueue, reason };
     output.actions.push({ name: "transfer_to_operator", status: "queued", data: { queue: output.handoff.queue, status: "waiting" } });
-    output.reply = text("Запрос и контекст переданы в очередь специалиста. Оператор сможет продолжить этот разговор.", "Сұраныс пен контекст маман кезегіне берілді. Оператор осы әңгімені жалғастыра алады."); return output;
+    output.reply = text("Запрос и контекст переданы в очередь специалиста. Оператор сможет продолжить этот разговор.", "Сұраныс пен контекст маман кезегіне берілді. Оператор осы әңгімені жалғастыра алады.", "Запрос и контекст переданы в очередь специалиста. Оператор осы әңгімені жалғастыра алады."); return output;
   };
   if (state.status === "closed") { output.reply = text("Разговор завершён; начните новый для следующего вопроса.", "Әңгіме аяқталды; келесі сұрақ үшін жаңасын бастаңыз."); return output; }
   const candidates = decision.scenarios.filter(c => dataset.scenarios.some(s => s.scenario_id === c.scenarioId) || dataset.systemIntents.some(s => s.id === c.scenarioId));
@@ -190,7 +205,11 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
       state.pendingConfirmation = null; state.unclearCount = 0;
       state.activeScenarioId = state.suspendedScenarioIds.pop() ?? null;
       state.slots = state.activeScenarioId ? structuredClone(state.slotsByScenario[state.activeScenarioId] ?? {}) : {};
-      output.reply = text("Передача отменена. Продолжим разговор здесь.", "Маманға беру тоқтатылды. Әңгімені осы жерде жалғастырайық."); return output;
+      if (state.activeScenarioId === "SC34") {
+        delete state.slots.__app_help_failed;
+        state.slotsByScenario.SC34 = structuredClone(state.slots);
+      }
+      output.reply = text("Передача отменена. Продолжим разговор здесь.", "Маманға беру тоқтатылды. Әңгімені осы жерде жалғастырайық.", "Передача отменена. Әңгімені осы жерде жалғастырайық."); return output;
     }
     if (decision.confirmation === "confirm") {
       const previous = await store.get("operations", pendingHandoff.id);
@@ -201,11 +220,12 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
     }
     if (decision.isContinuation || primary?.scenarioId === "SYS_UNCLEAR") {
       output.facts = { confirmation_required: true, proposed_queue: pendingHandoff.slots.__handoff_queue };
-      output.reply = text("Передать запрос специалисту? Ответьте «да» или «нет».", "Сұранысты маманға берейін бе? «Иә» немесе «жоқ» деп жауап беріңіз."); return output;
+      output.reply = text("Передать запрос специалисту? Ответьте «да» или «нет».", "Сұранысты маманға берейін бе? «Иә» немесе «жоқ» деп жауап беріңіз.", "Сұранысты маманға берейін бе? Ответьте «да» или «нет»."); return output;
     }
   }
-  // A direct request to connect a person is already the client's decision.
-  if (primary?.scenarioId === "SC37" && primary.confidence >= 0.45) return handoff(pendingHandoff ? string(pendingHandoff.slots.__handoff_queue) : "operator_general", pendingHandoff ? string(pendingHandoff.slots.__handoff_reason) : "Client requested a human operator", true);
+  // Only an unambiguous direct request is already the client's decision.
+  // Lower-confidence routing must reach the clarification branch below.
+  if (primary?.scenarioId === "SC37" && primary.confidence >= 0.75 && !decision.clarification && !decision.alternatives.length) return handoff(pendingHandoff ? string(pendingHandoff.slots.__handoff_queue) : "operator_general", pendingHandoff ? string(pendingHandoff.slots.__handoff_reason) : "Client requested a human operator", true);
   if (primary?.scenarioId === "SYS_GOODBYE" && primary.confidence >= 0.75) { state.status = "closed"; state.pendingConfirmation = null; output.reply = text("Спасибо за обращение. Всего доброго!", "Хабарласқаныңызға рақмет. Сау болыңыз!"); return output; }
   if (primary?.scenarioId === "SYS_OUT_OF_SCOPE" && primary.confidence >= 0.75) { output.reply = text("Я помогаю с услугами страхования Saqta: авто, ДМС, поездки, имущество и несчастные случаи. Какой вопрос по этим услугам вас интересует?", "Мен Saqta сақтандыруы бойынша көмектесемін: көлік, ДМС, саяхат, мүлік және жазатайым оқиғалар. Осы қызметтер бойынша қандай сұрағыңыз бар?"); return output; }
   const continued = decision.isContinuation && !!state.activeScenarioId && (!primary || primary.scenarioId === state.activeScenarioId || primary.scenarioId === "SYS_UNCLEAR");
@@ -213,7 +233,7 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
     state.unclearCount = (!primary || primary.confidence < 0.45 || primary.scenarioId === "SYS_UNCLEAR") ? state.unclearCount + 1 : 0;
     if ((!primary || primary.confidence < 0.45 || primary.scenarioId === "SYS_UNCLEAR") && state.unclearCount >= 2) return handoff("operator_general", "Two unresolved low-confidence turns");
     const choices = [...ranked, ...decision.alternatives].filter(c => dataset.scenarios.some(s => s.scenario_id === c.scenarioId)).slice(0, 2).map(c => dataset.scenarios.find(s => s.scenario_id === c.scenarioId)!.name);
-    output.reply = decision.clarification || (choices.length === 2 ? text(`Вы хотите: ${choices[0]} или ${choices[1]}?`, `${choices[0]} немесе ${choices[1]} керек пе?`) : text("Уточните, пожалуйста: вам нужна информация, действие по полису или помощь со страховым случаем?", "Нақтылаңызшы: ақпарат, полис бойынша әрекет немесе сақтандыру оқиғасына көмек керек пе?")); return output;
+    output.reply = decision.clarification || (choices.length === 2 ? text(`Вы хотите: ${choices[0]} или ${choices[1]}?`, `${choices[0]} немесе ${choices[1]} керек пе?`, `Уточните, қайсысы керек: ${choices[0]} немесе ${choices[1]}?`) : text("Уточните, пожалуйста: вам нужна информация, действие по полису или помощь со страховым случаем?", "Нақтылаңызшы: ақпарат, полис бойынша әрекет немесе сақтандыру оқиғасына көмек керек пе?", "Нақтылаңызшы: нужна информация, действие по полису немесе помощь со страховым случаем?")); return output;
   }
   state.unclearCount = 0;
   const targetId = continued ? state.activeScenarioId! : primary!.scenarioId;
@@ -221,6 +241,7 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
   if (!scenario) return handoff("operator_general", "Scenario missing from catalog");
   const previousId = state.activeScenarioId;
   if (previousId && previousId !== targetId) {
+    if (previousId === "SC34") delete state.slots.__app_help_failed;
     state.slotsByScenario[previousId] = structuredClone(state.slots);
     if (!state.suspendedScenarioIds.includes(previousId)) state.suspendedScenarioIds.push(previousId);
     state.pendingConfirmation = null; state.lookupFailures = 0;
@@ -228,8 +249,15 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
   if (previousId !== targetId) {
     const previousSlots = state.slots;
     state.slots = structuredClone(state.slotsByScenario[targetId] ?? {});
+    if (targetId === "SC34") delete state.slots.__app_help_failed;
     if (targetId === "SC02") for (const key of ["region", "vehicle_type", "vehicle_plate", "drivers_iin", "phone", "term_months"]) if (!state.slots[key] && (previousId === "SC01" || state.completedScenarioIds.at(-1) === "SC01")) state.slots[key] = previousSlots[key] ?? null;
     state.lastQuestionSlot = null;
+  }
+  // A new app-help request is not a continuation of an earlier failed attempt.
+  // An actual confirmation still restores its reviewed snapshot below.
+  if (targetId === "SC34" && !continued && decision.confirmation === "none") {
+    delete state.slots.__app_help_failed;
+    if (state.pendingConfirmation?.scenarioId === "SC34") state.pendingConfirmation = null;
   }
   state.activeScenarioId = targetId;
   state.suspendedScenarioIds = state.suspendedScenarioIds.filter(id => id !== targetId);
@@ -246,7 +274,7 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
   try {
     for (const [key, value] of Object.entries(decision.slots)) {
       if (!accepted.has(key) || !present(value)) continue;
-      const def = dataset.slots.find(s => s.name === key);
+      const def = slotDefinitions.find(s => s.name === key);
       const normalized = def ? normalizeSlot(def, value, dataset.businessDate) : value;
       if (key === "term_months" && ![6, 12].includes(Number(normalized))) throw new DomainError("invalid_input", "Доступен срок шесть или двенадцать месяцев.", "Алты немесе он екі ай мерзімі қолжетімді.", "term_months");
       if (key === "package" && !["Standard", "Lite"].includes(string(normalized))) throw new DomainError("invalid_input", "Уточните программу: Standard или Lite.", "Бағдарламаны нақтылаңыз: Standard немесе Lite.", "package");
@@ -255,19 +283,20 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
     }
     // Stored slots originated in earlier LLM turns too; validate them at each execution boundary.
     for (const [key, value] of Object.entries(state.slots)) {
-      const def = dataset.slots.find(s => s.name === key); if (def && present(value)) state.slots[key] = normalizeSlot(def, value, dataset.businessDate);
+      const def = slotDefinitions.find(s => s.name === key); if (def && present(value)) state.slots[key] = normalizeSlot(def, value, dataset.businessDate);
     }
     if (targetId === "SC29" && state.slots.contact_field && state.slots.new_value) {
-      const kind = string(state.slots.contact_field), def = dataset.slots.find(s => s.name === kind);
+      const kind = string(state.slots.contact_field), def = slotDefinitions.find(s => s.name === kind);
       if (def) state.slots.new_value = normalizeSlot(def, state.slots.new_value, dataset.businessDate);
     }
     if (changedWhilePending) state.pendingConfirmation = null;
     if (state.pendingConfirmation && decision.confirmation === "reject") {
-      state.pendingConfirmation = null; output.reply = text("Действие отменено. Какие данные нужно изменить?", "Әрекет тоқтатылды. Қандай деректерді өзгерту керек?"); return output;
+      if (targetId === "SC34") delete state.slots.__app_help_failed;
+      state.pendingConfirmation = null; output.reply = text("Действие отменено. Какие данные нужно изменить?", "Әрекет тоқтатылды. Қандай деректерді өзгерту керек?", "Действие отменено. Қандай деректерді өзгерту керек?"); return output;
     }
     await identifyAndFill(input, state, scenario);
     if (scenario.requires_identification && !state.clientId) {
-      state.lastQuestionSlot = "phone"; output.reply = text("Назовите телефон, ИИН, номер полиса или заявления для поиска клиента.", "Клиентті табу үшін телефон, ЖСН, полис немесе өтініш нөмірін айтыңыз."); return output;
+      state.lastQuestionSlot = "phone"; output.reply = text("Назовите телефон, ИИН, номер полиса или заявления для поиска клиента.", "Клиентті табу үшін телефон, ЖСН, полис немесе өтініш нөмірін айтыңыз.", "Клиентті табу үшін назовите телефон, ЖСН, номер полиса или заявления."); return output;
     }
     const required = [...scenario.slots.required];
     if (targetId === "SC02") required.push("region", "vehicle_type");
@@ -292,7 +321,10 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
       // The operation is executed using its persisted snapshot, never newly guessed arguments.
       state.slots = structuredClone(pending.slots);
     }
-    const plan = await planActions({ dataset, store, scenario, slots: state.slots, clientId: state.clientId, sessionId: input.sessionId, requestId: input.requestId, preview: !confirmed });
+    // Preserve the reported troubleshooting failure in the reviewed snapshot so
+    // the next confirmation does not accidentally re-plan a different operation.
+    if (scenario.scenario_id === "SC34" && appHelpFailed(input.text)) state.slots.__app_help_failed = true;
+    const plan = await planActions({ dataset, store, scenario, slots: state.slots, clientId: state.clientId, sessionId: input.sessionId, requestId: input.requestId, text: input.text, preview: !confirmed });
     const needsConfirmation = plan.writes.length > 0 || Boolean(plan.handoff);
     const signature = reviewSignature(plan);
     const changedAtExecution = confirmed && pending.slots.__review !== signature;
@@ -328,11 +360,23 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
         const list = array(object(plan.facts.kb_lookup).documents).map(value => { const label = string(value), translated = documents[label]; return translated ? text(...translated) : label; }).join(", ");
         if (list) readAnswer = text(`Нужны: ${list}. `, `Қажет құжаттар: ${list}. `);
       }
-      output.reply = `${safety}${readAnswer}${changedAtExecution ? text("Условия изменились: ", "Шарттар өзгерді: ") : ""}${summary}. ${text("Подтверждаете?", "Растайсыз ба?")}`;
+      output.reply = `${safety}${readAnswer}${changedAtExecution ? text("Условия изменились: ", "Шарттар өзгерді: ") : ""}${summary}. ${text("Подтверждаете?", "Растайсыз ба?", "Растайсыз ба? Ответьте «да» или «нет».")}`;
       output.facts.confirmation_required = true; return output;
     }
     for (const write of plan.writes) await store.put(write.kind, write.id, write.value);
     state.clientId = plan.clientId;
+    if (confirmed && targetId === "SC29" && state.slots.contact_field === "phone") {
+      const clientWrite = plan.writes.find(write => write.kind === "clients" && write.id === state.clientId);
+      if (clientWrite && typeof clientWrite.value.phone === "string") {
+        // Update identity references only after the confirmed entity write. Keep
+        // a different explicitly supplied phone and the reviewed snapshot intact.
+        const previousPhone = state.slots.phone;
+        state.slots.phone = clientWrite.value.phone;
+        if (present(previousPhone)) for (const savedSlots of Object.values(state.slotsByScenario)) {
+          if (savedSlots.phone === previousPhone) savedSlots.phone = clientWrite.value.phone;
+        }
+      }
+    }
     output.actions = plan.results; output.reply = fallbackReply(scenario, plan, state);
     if (plan.handoff) { output.handoff = plan.handoff; state.status = "handoff"; }
     if (confirmed) await store.put("operations", pending.id, { id: pending.id, scenario_id: targetId, actions: plan.results as unknown as Json, facts: output.facts, reply: output.reply, applied_at: new Date().toISOString(), session_id: input.sessionId });
@@ -340,6 +384,7 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
     const nextId = state.pendingScenarioIds.shift() ?? state.suspendedScenarioIds.pop();
     if (nextId && state.status === "active") {
       state.activeScenarioId = nextId; state.slots = structuredClone(state.slotsByScenario[nextId] ?? {});
+      if (nextId === "SC34") delete state.slots.__app_help_failed;
       const next = dataset.scenarios.find(s => s.scenario_id === nextId);
       if (next) {
         // A follow-up lookup must not replace a successfully committed operation's result.
