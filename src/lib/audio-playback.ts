@@ -111,6 +111,7 @@ export async function createAudioPlayback(
   signal: AbortSignal,
   onStreamError: (error: unknown) => void,
   audio = createPersistentAudio(),
+  onAudioData?: (blob: Blob, audio: HTMLAudioElement, sourceUrl: string) => void,
 ) {
   if (signal.aborted) throw cancelled();
   const owner = ownerOf(audio);
@@ -131,6 +132,12 @@ export async function createAudioPlayback(
     assertCurrent();
     return audio.play().then(() => { assertCurrent(); });
   };
+  const reportAudio = (blob: Blob, url: string) => {
+    if (!onAudioData || signal.aborted || owner.epoch !== epoch) return;
+    // Optional visualization receives a copy only. It must never delay play or
+    // turn a decoding/analysis failure into a native playback failure.
+    try { onAudioData(blob, audio, url); } catch { /* Playback remains native. */ }
+  };
   const mime = (response.headers.get("Content-Type") || "audio/mpeg").split(";")[0];
   if (!response.body || typeof MediaSource === "undefined" || !MediaSource.isTypeSupported(mime)) {
     const blob = await response.blob();
@@ -139,6 +146,7 @@ export async function createAudioPlayback(
     if (blob.size > 4_000_000) throw new Error("Превышен размер голосового ответа.");
     const url = URL.createObjectURL(blob);
     try { install(url); } catch (error) { URL.revokeObjectURL(url); throw error; }
+    reportAudio(blob, url);
     return { audio, url, streamed: false, start: play };
   }
   const source = new MediaSource();
@@ -161,6 +169,7 @@ export async function createAudioPlayback(
         const cancel = () => { void reader.cancel().catch(() => {}); };
         signal.addEventListener("abort", cancel, { once: true });
         let total = 0;
+        const audioParts: BlobPart[] = [];
         try {
           while (true) {
             assertCurrent();
@@ -169,6 +178,7 @@ export async function createAudioPlayback(
             if (next.done) break;
             total += next.value.byteLength;
             if (total > 4_000_000) throw new Error("Превышен размер голосового ответа.");
+            if (onAudioData) audioParts.push(new Uint8Array(next.value));
             const appended = eventOnce(buffer, "updateend", signal);
             try { buffer.appendBuffer(new Uint8Array(next.value)); }
             catch (error) { void appended.catch(() => {}); throw error; }
@@ -182,6 +192,7 @@ export async function createAudioPlayback(
           }
           if (!total) throw new Error("Сервис озвучивания вернул пустой ответ.");
           if (source.readyState === "open") source.endOfStream();
+          if (onAudioData) reportAudio(new Blob(audioParts, { type: mime }), url);
         } catch (error) { await reader.cancel(error).catch(() => {}); throw error; }
         finally {
           signal.removeEventListener("abort", cancel);

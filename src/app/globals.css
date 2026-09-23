@@ -1033,6 +1033,8 @@ html[data-theme="dark"] .context-topics button:disabled { color: #acbeb3; backgr
 /* Immersive voice: one canvas, optional transparent transcript, overlay details.
    Scoped to the conversation so the operational screens keep their own frame. */
 .app-shell.immersive-voice {
+  position: relative;
+  isolation: isolate;
   --voice-canvas: #fff;
   --voice-text: #202629;
   --voice-muted: #626d73;
@@ -1056,7 +1058,7 @@ html[data-theme="dark"] .app-shell.immersive-voice {
 }
 .app-shell.immersive-voice.nav-hidden > .sidebar { display: none; }
 .app-shell.immersive-voice.nav-hidden > .main-shell { margin-left: 0; width: 100%; }
-.app-shell.immersive-voice > .main-shell { background: var(--voice-canvas); }
+.app-shell.immersive-voice > .main-shell { position: relative; z-index: 1; background: transparent; }
 .app-shell.immersive-voice .topbar {
   height: 58px;
   min-height: 58px;

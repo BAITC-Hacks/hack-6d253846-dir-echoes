@@ -7,18 +7,16 @@ export type VoiceParticleMode = "idle" | "listening" | "speaking" | "processing"
 type VoiceParticlesProps = { mode: VoiceParticleMode; level: number; replyLevel?: number; callActive?: boolean; theme?: "light" | "dark"; variant?: "compact" | "stage" };
 type Point = { height: number; angle: number; sheet: number; spread: number; grain: number; phase: number; sinPhase: number; sinPhase16: number; veil: boolean; scatterX: number; scatterY: number; scatterZ: number };
 type ProjectedPoint = { x: number; y: number; size: number; alpha: number; colorBand: number };
-type Star = { x: number; y: number; drift: number; phase: number; size: number; alpha: number };
 type LogoPoint = { x: number; y: number; red: number; green: number; blue: number };
 type LogoVariant = "classic" | "gold" | "dir";
 
 const PARTICLE_COUNT = 3400;
-const STAR_COUNT = 180;
 const FRAME_INTERVAL_MS = 1000 / 60;
 const ALPHA_BANDS = 12;
 const COLORS: Record<"light" | "dark", Record<VoiceParticleMode, readonly [number, number, number]>> = {
   light: {
-    idle: [67, 77, 82], listening: [29, 154, 88], speaking: [25, 174, 88],
-    processing: [171, 117, 37], replying: [210, 108, 37], error: [191, 66, 74],
+    idle: [39, 48, 54], listening: [22, 126, 68], speaking: [19, 145, 72],
+    processing: [171, 117, 37], replying: [181, 81, 27], error: [191, 66, 74],
   },
   dark: {
     idle: [237, 241, 244], listening: [128, 237, 164], speaking: [144, 247, 176],
@@ -60,19 +58,6 @@ function nearbyLogoTargets(projected: ProjectedPoint[], targets: LogoPoint[], co
     sourceBand.forEach((index, position) => { mapped[index] = targetBand[position]; });
   }
   return mapped;
-}
-
-function galaxyPoints(): Star[] {
-  let seed = 0x7105aaf;
-  const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
-  return Array.from({ length: STAR_COUNT }, (_, index) => {
-    const prominent = index % 61 === 0;
-    return {
-      x: random(), y: random(), drift: 0.45 + random() * 0.55,
-      phase: random() * Math.PI * 2, size: prominent ? 1.1 : 0.50 + random() * 0.60,
-      alpha: prominent ? 0.76 : 0.24 + random() * 0.32,
-    };
-  });
 }
 
 function sampleLogo(image: HTMLImageElement, variant: LogoVariant): LogoPoint[] {
@@ -120,7 +105,6 @@ function sampleLogo(image: HTMLImageElement, variant: LogoVariant): LogoPoint[] 
   });
 }
 
-const wrapUnit = (value: number) => ((value % 1) + 1) % 1;
 const normalizedLevel = (value: number) => Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
 const ease = (value: number) => { const t = Math.max(0, Math.min(1, value)); return t * t * t * (t * (t * 6 - 15) + 10); };
 
@@ -147,14 +131,11 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
     if (!canvas || !context) return;
 
     const points = flowPoints();
-    const stars = galaxyPoints();
     // Select once per mount, so resize/audio never makes particle counts flicker.
     const modestDevice = window.matchMedia("(pointer: coarse)").matches || window.innerWidth < 720 || (navigator.hardwareConcurrency > 0 && navigator.hardwareConcurrency <= 4);
     const particleCount = modestDevice ? 1800 : window.innerWidth < 1100 ? 2600 : PARTICLE_COUNT;
     const projected: ProjectedPoint[] = points.slice(0, particleCount).map(() => ({ x: 0, y: 0, size: 0, alpha: 0, colorBand: 0 }));
     const drawBatches: number[][] = Array.from({ length: ALPHA_BANDS * 3 }, () => []);
-    const starProjected = stars.map(() => ({ x: 0, y: 0 }));
-    const starBatches: number[][] = Array.from({ length: 8 }, () => []);
     const logoVariants: Partial<Record<LogoVariant, LogoPoint[]>> = {};
     const logoImages: HTMLImageElement[] = [];
     const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -174,6 +155,7 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
     let scatter = 0;
     let scatterVelocity = 0;
     let replyMorph = 0;
+    let activeMorph = 0;
     let startBurstAge = 10;
     let activityBurstLatched = inputRef.current.callActive || inputRef.current.mode !== "idle";
     const pointer = { targetX: 0.5, targetY: 0.5, x: 0.5, y: 0.5, targetStrength: 0, strength: 0 };
@@ -181,6 +163,7 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
     let nextLogoAt = 10;
     let logoStartedAt: number | null = null;
     let logoTargets: LogoPoint[] | null = null;
+    let activeLogoVariant: LogoVariant | null = null;
     let logoBlend = 0;
     let logoReleaseAt: number | null = null;
     let logoReleaseFrom = 0;
@@ -212,6 +195,8 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
       if (!reducedMotion) startBurstAge += elapsed;
       const startBurst = reducedMotion || startBurstAge >= 1.25 ? 0 : Math.sin(Math.PI * startBurstAge / 1.25) ** 2;
       replyMorph += ((current.mode === "replying" ? 1 : 0) - replyMorph) * (reducedMotion ? 1 : 1 - Math.exp(-elapsed * 5));
+      const audibleState = current.mode === "listening" || current.mode === "speaking" || current.mode === "replying";
+      activeMorph += ((audibleState ? 1 : 0) - activeMorph) * (reducedMotion ? 1 : 1 - Math.exp(-elapsed * 5));
       const pointerSmoothing = 1 - Math.exp(-elapsed * 10);
       pointer.x += (pointer.targetX - pointer.x) * pointerSmoothing;
       pointer.y += (pointer.targetY - pointer.y) * pointerSmoothing;
@@ -232,8 +217,10 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
         } else if (logoAllowed && logoStartedAt === null && idleSeconds >= nextLogoAt) {
           const ready = (Object.keys(logoVariants) as LogoVariant[]).filter(key => logoVariants[key]?.length);
           if (ready.length) {
-            const selected = logoVariants[ready[Math.floor(logoRandom() * ready.length)]];
+            const selectedVariant = ready[Math.floor(logoRandom() * ready.length)];
+            const selected = logoVariants[selectedVariant];
             logoTargets = selected ? nearbyLogoTargets(projected, selected, particleCount) : null;
+            activeLogoVariant = logoTargets ? selectedVariant : null;
             if (logoTargets) {
               const sums = [[0, 0, 0, 0], [0, 0, 0, 0]];
               for (const point of logoTargets) {
@@ -248,8 +235,8 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
         }
         if (logoAllowed && logoReleaseAt === null && logoStartedAt !== null) {
           const age = idleSeconds - logoStartedAt;
-          logoBlend = age < 2.6 ? ease(age / 2.6) : age < 5.1 ? 1 : 1 - ease((age - 5.1) / 2.8);
-          if (age >= 7.9) { logoBlend = 0; logoStartedAt = null; }
+          logoBlend = age < 4 ? ease(age / 4) : age < 6.5 ? 1 : 1 - ease((age - 6.5) / 4);
+          if (age >= 10.5) { logoBlend = 0; logoStartedAt = null; }
         }
       }
       const microphoneActive = current.mode === "listening" || current.mode === "speaking";
@@ -257,7 +244,7 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
         : current.mode === "replying" ? normalizedLevel(current.replyLevel) : 0;
       // Monotonic compression exposes quiet measured sound without a dead zone
       // or minimum fake speech level: exactly zero input still gives zero.
-      const responsiveLevel = Math.min(1, Math.sqrt(measuredLevel) * 1.65);
+      const responsiveLevel = Math.min(1, Math.sqrt(measuredLevel) * 1.80);
       const smoothing = 1 - Math.exp(-elapsed * 12);
       // Let the previous deformation settle when the measured source changes;
       // never reset the shape abruptly or substitute microphone data for TTS.
@@ -283,7 +270,7 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
       const speed = current.mode === "processing" ? 0.46 : current.mode === "replying" ? 0.33 : 0.23;
       if (!reducedMotion) {
         phase += elapsed * speed;
-        // Background time is deliberately independent of mode and audio level.
+        // Breathing/logo time stays independent of mode and measured loudness.
         galaxyTime += elapsed;
       }
       const motion = reducedMotion ? 0 : phase;
@@ -291,8 +278,10 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
       const tilt = -0.04 + Math.sin(motion * 0.31) * 0.035;
       const cosY = Math.cos(angle), sinY = Math.sin(angle);
       const cosX = Math.cos(tilt), sinX = Math.sin(tilt);
-      const cloudMix = Math.min(0.78, (0.5 + Math.sin(motion * 0.47 - 0.8) * 0.5) * 0.62 + replyMorph * 0.20);
-      const vortexMix = (0.5 + Math.sin(motion * 0.33 + 1.8) * 0.5) * 0.48 * (1 - replyMorph * 0.35);
+      // Keep the speaking silhouette broad and coherent: opposing shape mixes
+      // previously cancelled its width and made the reply look like a thin pole.
+      const cloudMix = (0.5 + Math.sin(motion * 0.47 - 0.8) * 0.5) * 0.62 * (1 - activeMorph) + activeMorph * 0.16;
+      const vortexMix = (0.5 + Math.sin(motion * 0.33 + 1.8) * 0.5) * 0.48 * (1 - activeMorph * 0.88);
       const twist = 4.8 + Math.sin(motion * 0.41) * 1.2;
       const breath = reducedMotion ? 0 : Math.sin(galaxyTime * 0.95);
       const breathX = 1 + breath * 0.026;
@@ -301,8 +290,8 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
       // Cap horizontal expansion on ultrawide canvases to retain organic folds.
       const scale = Math.min(height * 0.43, width * 0.70);
       const stage = current.variant === "stage";
-      const scaleX = (stage ? Math.min(width * 0.36, height * 0.68) : scale) * breathX * (1 - replyMorph * 0.24);
-      const scaleY = (stage ? height * 0.40 : scale) * breathY * (1 - replyMorph * 0.16);
+      const scaleX = (stage ? Math.min(width * 0.36, height * 0.68) : scale) * breathX * (1 + activeMorph * 0.20 + replyMorph * 0.08 + audioEnvelope * 0.08);
+      const scaleY = (stage ? height * 0.40 : scale) * breathY * (1 + activeMorph * 0.05 - replyMorph * 0.03 + audioEnvelope * 0.04);
       const centerX = width / 2;
       const centerY = height / 2 + (reducedMotion ? 0 : Math.sin(galaxyTime * 0.48) * height * 0.004);
       const logoScale = stage ? Math.min(width * 0.28, height * 0.35) : Math.min(width, height) * 0.38;
@@ -310,7 +299,11 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
       const red = Math.round(color[0]), green = Math.round(color[1]), blue = Math.round(color[2]);
       const dark = current.theme === "dark";
       const logoColorBlend = logoAllowed ? logoBlend : 0;
-      const palette = [`rgb(${red},${green},${blue})`, ...logoColors.map(channels => `rgb(${Math.round(red + (channels[0] - red) * logoColorBlend)},${Math.round(green + (channels[1] - green) * logoColorBlend)},${Math.round(blue + (channels[2] - blue) * logoColorBlend)})`)];
+      const palette = [`rgb(${red},${green},${blue})`, ...logoColors.map(source => {
+        // Contrast is a rendering choice; source mark assets remain untouched.
+        const channels = dark ? source : activeLogoVariant === "dir" ? COLORS.light.idle : source.map(channel => channel * 0.72);
+        return `rgb(${Math.round(red + (channels[0] - red) * logoColorBlend)},${Math.round(green + (channels[1] - green) * logoColorBlend)},${Math.round(blue + (channels[2] - blue) * logoColorBlend)})`;
+      })];
       const grainScale = Math.min(width, height) / 260;
       const pointerX = pointer.x * width, pointerY = pointer.y * height;
       const pointerRadius = Math.min(150, Math.max(65, Math.min(width, height) * 0.24));
@@ -320,40 +313,11 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
       context.setTransform(dpr, 0, 0, dpr, 0, 0);
       context.clearRect(0, 0, width, height);
 
-      if (stage) {
-        context.fillStyle = dark ? "rgb(213,221,229)" : "rgb(87,98,109)";
-        const time = reducedMotion ? 0 : galaxyTime;
-        for (const batch of starBatches) batch.length = 0;
-        for (let index = 0; index < stars.length; index++) {
-          const star = stars[index];
-          // Pixel-based speeds stay gently visible on mobile as well as desktop.
-          const x = wrapUnit(star.x + (time * 2.2 * star.drift + Math.sin(time * 0.12 + star.phase) * 5) / width);
-          const y = wrapUnit(star.y + (-time * 0.8 * star.drift + Math.cos(time * 0.10 + star.phase) * 5) / height);
-          // Keep the core legible without cutting a visible hole in the field.
-          const distance = Math.hypot((x - 0.5) / 0.29, (y - 0.5) / 0.44);
-          const centerFade = 0.20 + Math.min(1, distance) * 0.80;
-          starProjected[index].x = x * width;
-          starProjected[index].y = y * height;
-          starBatches[Math.min(7, Math.floor(star.alpha * centerFade * 8))].push(index);
-        }
-        for (let band = 0; band < starBatches.length; band++) {
-          if (!starBatches[band].length) continue;
-          context.globalAlpha = (band + 0.5) / 8;
-          context.beginPath();
-          for (const index of starBatches[band]) {
-            const point = starProjected[index], size = stars[index].size;
-            context.moveTo(point.x + size, point.y);
-            context.arc(point.x, point.y, size, 0, Math.PI * 2);
-          }
-          context.fill();
-        }
-      }
-
       for (let index = 0; index < particleCount; index++) {
         const point = points[index];
         const output = projected[index];
         const logo = logoTargets?.[index];
-        const grain = Math.max(0.24, Math.min(0.82, grainScale * (0.28 + point.grain * 0.37)));
+        const grain = Math.max(0.24, Math.min(0.82, grainScale * (0.28 + point.grain * 0.37))) * (1 + activeMorph * 0.20 + audioEnvelope * 0.12);
         if (logo && logoBlend >= 0.9999) {
           // The held logo still breathes below; skip thousands of unused
           // ribbon/cloud/vortex evaluations while their weight is zero.
@@ -389,7 +353,12 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
         const mixedX = ribbonX + (cloudX - ribbonX) * cloudMix;
         const mixedY = ribbonY + (cloudY - ribbonY) * cloudMix;
         const mixedZ = ribbonZ + (cloudZ - ribbonZ) * cloudMix;
-        const travel = (scatter * (0.16 + point.spread * 0.48) + startBurst * (0.28 + point.spread * 0.34)) * (point.veil ? 1.20 : 1);
+        // Listening keeps a cohesive cloud; measured microphone energy mainly
+        // pulses its folds/scale. Replying opens the field as a state cue, then
+        // actual output RMS adds dispersion. No measured sound is fabricated.
+        const travel = (scatter * (0.045 + point.spread * 0.11) * (1 + replyMorph * 1.4)
+          + replyMorph * (0.12 + point.spread * 0.17)
+          + startBurst * (0.28 + point.spread * 0.34)) * (point.veil ? 1.20 : 1);
         const x = mixedX + (vortexX - mixedX) * vortexMix + point.scatterX * travel;
         const y = mixedY + (vortexY - mixedY) * vortexMix + point.scatterY * travel;
         const z = mixedZ + (vortexZ - mixedZ) * vortexMix + point.scatterZ * travel;
@@ -405,13 +374,16 @@ export function VoiceParticles({ mode, level, replyLevel = 0, callActive = false
         output.size = grain * perspective;
         // More fine samples and stronger front-facing folds reveal the silver
         // fabric on dark surfaces; particle radii stay tiny, without glow discs.
-        const materialAlpha = dark ? 0.22 + front * 0.34 + crease * 0.38 : 0.16 + front * 0.26 + crease * 0.32;
-        output.alpha = Math.min(0.94, materialAlpha) * (point.veil ? dark ? 0.46 : 0.35 : 1) * (0.76 + point.grain * 0.24);
+        const materialAlpha = dark ? 0.22 + front * 0.34 + crease * 0.38 : 0.60 + front * 0.18 + crease * 0.18;
+        output.alpha = Math.min(0.95, materialAlpha) * (point.veil ? dark ? 0.46 : 0.50 : 1) * (dark ? 0.76 + point.grain * 0.24 : 0.86 + point.grain * 0.14);
         }
         output.colorBand = 0;
         if (logo && logoBlend > 0) {
           output.x += (centerX + logo.x * logoScale * breathX + logoWave * point.sinPhase - output.x) * logoBlend;
           output.y += (centerY + logo.y * logoScale * breathY + logoWave * point.sinPhase16 * 0.65 - output.y) * logoBlend;
+          const arc = Math.sin(Math.PI * logoBlend) * logoScale * 0.025;
+          output.x += point.scatterY * arc;
+          output.y -= point.scatterX * arc;
           output.size += (grain - output.size) * logoBlend;
           output.alpha += (0.90 - output.alpha) * logoBlend;
           if (logoColorBlend > 0) output.colorBand = logo.green > logo.red ? 1 : 2;
