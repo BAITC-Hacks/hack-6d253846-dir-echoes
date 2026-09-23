@@ -1029,3 +1029,317 @@ html[data-theme="dark"] .context-topics button:disabled { color: #acbeb3; backgr
   .context-card { padding: 14px; }
   .context-card p, .context-card ul { font-size: 14px; }
 }
+
+/* Immersive voice: one canvas, optional transparent transcript, overlay details.
+   Scoped to the conversation so the operational screens keep their own frame. */
+.app-shell.immersive-voice {
+  --voice-canvas: #fff;
+  --voice-text: #202629;
+  --voice-muted: #626d73;
+  --voice-line: #e2e7e5;
+  --voice-control: #f5f7f6;
+  --voice-hover: #eaf0ed;
+  --voice-drawer: #fffffff7;
+  --voice-shadow: #16251d15;
+  background: var(--voice-canvas);
+  color: var(--voice-text);
+}
+html[data-theme="dark"] .app-shell.immersive-voice {
+  --voice-canvas: #000;
+  --voice-text: #f1f3f2;
+  --voice-muted: #a9b0ae;
+  --voice-line: #ffffff1c;
+  --voice-control: #ffffff0d;
+  --voice-hover: #ffffff17;
+  --voice-drawer: #080a09f7;
+  --voice-shadow: #0009;
+}
+.app-shell.immersive-voice.nav-hidden > .sidebar { display: none; }
+.app-shell.immersive-voice.nav-hidden > .main-shell { margin-left: 0; width: 100%; }
+.app-shell.immersive-voice > .main-shell { background: var(--voice-canvas); }
+.app-shell.immersive-voice .topbar {
+  height: 58px;
+  min-height: 58px;
+  padding: 8px 24px;
+  gap: 14px;
+  background: transparent;
+  border: 0;
+}
+.app-shell.immersive-voice .topbar :is(.button, .icon-button) {
+  min-height: 36px;
+  border-color: transparent;
+  border-radius: 20px;
+  color: var(--voice-muted);
+  background: transparent;
+  font-size: 13px;
+  font-weight: 500;
+}
+.app-shell.immersive-voice .topbar :is(.button, .icon-button):hover:not(:disabled) { background: var(--voice-hover); color: var(--voice-text); }
+.app-shell.immersive-voice .topbar-right { gap: 9px; }
+.app-shell.immersive-voice :is(.breadcrumb, .breadcrumb > strong, .connection-status) { color: var(--voice-muted); }
+.app-shell.immersive-voice .topbar-divider { display: none; }
+.app-shell.immersive-voice .main-content.view-conversation,
+.app-shell.immersive-voice .workspace-main { max-width: none; padding: 0 24px 20px; background: transparent; }
+.app-shell.immersive-voice :is(.page-heading, .page-footer, .stats-grid) { display: none; }
+.app-shell.immersive-voice .conversation-layout.immersive-layout,
+.app-shell.immersive-voice .conversation-layout.immersive-layout:has(> aside) {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  min-height: 0;
+  overflow: visible;
+}
+.app-shell.immersive-voice .conversation-panel.voice-focused {
+  height: 100%;
+  max-height: none;
+  min-height: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.app-shell.immersive-voice .voice-focused .conversation-heading {
+  min-height: 56px;
+  padding: 8px 0 12px;
+  gap: 9px;
+  border: 0;
+  background: transparent;
+}
+.app-shell.immersive-voice .conversation-title h2 { color: var(--voice-text); font-size: 15px; font-weight: 550; }
+.app-shell.immersive-voice .conversation-title > span { color: var(--voice-muted); font-size: 12px; margin-top: 3px; }
+.app-shell.immersive-voice .conversation-heading :is(.button, .icon-button) {
+  min-height: 36px;
+  padding: 8px 11px;
+  background: var(--voice-control);
+  border-color: transparent;
+  border-radius: 22px;
+  color: var(--voice-muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+.app-shell.immersive-voice .conversation-heading .icon-button { width: 36px; padding: 8px; }
+.app-shell.immersive-voice .conversation-heading :is(.button, .icon-button):hover:not(:disabled),
+.app-shell.immersive-voice .conversation-heading [aria-expanded="true"] { background: var(--voice-hover); color: var(--voice-text); }
+.app-shell.immersive-voice .conversation-heading .audio-enabled { color: #62b48a; }
+.app-shell.immersive-voice .voice-conversation-space {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  gap: 0;
+}
+.app-shell.immersive-voice .conversation-panel.voice-focused .voice-stage {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  padding: 0 12px 24px;
+  gap: 6px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: hidden;
+}
+.app-shell.immersive-voice .voice-focused .voice-stage > .voice-particles {
+  width: min(700px, 100%) !important;
+  height: min(55dvh, 560px) !important;
+  max-height: min(55dvh, 560px);
+  min-height: 120px;
+  flex: 0 1 min(55dvh, 560px);
+}
+.app-shell.immersive-voice .voice-focused .voice-stage-copy { position: relative; z-index: 20; gap: 8px; max-width: 560px; flex-shrink: 0; padding: 0; pointer-events: none; }
+.app-shell.immersive-voice .voice-focused .voice-stage-copy > strong { color: var(--voice-text); font-size: 23px; font-weight: 500; letter-spacing: -.35px; line-height: 1.35; }
+.app-shell.immersive-voice .voice-focused .voice-stage-copy > span { color: var(--voice-muted); max-width: 470px; font-size: 14px; line-height: 1.6; }
+.app-shell.immersive-voice .voice-focused .voice-stage-copy > .voice-control-buttons { position: relative; margin: 12px 0 0; gap: 10px; pointer-events: auto; }
+.app-shell.immersive-voice .voice-focused .voice-stage-copy .button-call { min-height: 48px; padding: 12px 22px; border-radius: 28px; font-size: 14px; font-weight: 550; }
+.app-shell.immersive-voice .voice-stage-copy .button-secondary { border: 1px solid var(--voice-line); color: var(--voice-text); background: var(--voice-control); border-radius: 26px; }
+.app-shell.immersive-voice .voice-stage-copy .button-secondary:hover:not(:disabled) { background: var(--voice-hover); }
+.app-shell.immersive-voice .voice-stage-copy > .mic-level { margin-top: 8px; background: var(--voice-line); }
+
+/* Transparent transcript overlay: showing it never changes the stage geometry. */
+.app-shell.immersive-voice .voice-chat-panel {
+  position: absolute;
+  z-index: 10;
+  inset: 0 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  width: min(380px, 100%);
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  text-shadow: 0 1px 3px var(--voice-canvas), 0 1px 9px var(--voice-canvas);
+  overflow: hidden;
+  pointer-events: none;
+}
+.app-shell.immersive-voice .voice-chat-panel > :is(.transcript-toolbar, .conversation-body, .composer, .conversation-confirmation, .conversation-handoff) { pointer-events: auto; }
+.app-shell.immersive-voice .voice-chat-panel .transcript-toolbar { min-height: 40px; padding: 0 0 12px; gap: 8px; color: var(--voice-muted); font-size: 12px; }
+.app-shell.immersive-voice .voice-chat-panel .transcript-toolbar > span { margin-right: auto; color: var(--voice-text); font-size: 14px; font-weight: 500; }
+.app-shell.immersive-voice .voice-chat-panel .transcript-toolbar button { color: var(--voice-muted); font-size: 12px; padding: 6px 8px; border-radius: 18px; }
+.app-shell.immersive-voice .voice-chat-panel .transcript-toolbar button:hover:not(:disabled) { color: var(--voice-text); background: var(--voice-hover); border-color: transparent; }
+.app-shell.immersive-voice .voice-chat-panel .transcript-toolbar .icon-button { width: 30px; height: 30px; padding: 6px; }
+.app-shell.immersive-voice .voice-focused .voice-chat-panel .conversation-body { flex: 1 1 auto; min-height: 0; max-height: none; border: 0; background: transparent; scrollbar-color: var(--voice-line) transparent; }
+.app-shell.immersive-voice .voice-chat-panel .conversation-empty { padding: 24px 6px 24px 0; color: var(--voice-muted); }
+.app-shell.immersive-voice .voice-chat-panel .conversation-empty > p { margin: 0; color: var(--voice-muted); font-size: 14px; line-height: 1.75; }
+.app-shell.immersive-voice .voice-chat-panel .messages { padding: 10px 8px 6px 0; }
+.app-shell.immersive-voice .voice-chat-panel .turn-group { margin-bottom: 26px; }
+.app-shell.immersive-voice .voice-chat-panel .message-user { width: 100%; max-width: 100%; margin: 0 0 19px; }
+.app-shell.immersive-voice .voice-chat-panel .message-user > .message-meta { justify-content: flex-start; }
+.app-shell.immersive-voice .voice-chat-panel .message-user .message-bubble { padding: 0; color: var(--voice-text); border: 0; border-radius: 0; background: transparent; }
+.app-shell.immersive-voice .voice-chat-panel .message-assistant { margin-right: 0; gap: 0; }
+.app-shell.immersive-voice .voice-chat-panel .assistant-avatar { display: none; }
+.app-shell.immersive-voice .voice-chat-panel :is(.message, .message-assistant .message-bubble) { font-size: 15px; line-height: 1.7; color: var(--voice-text); }
+.app-shell.immersive-voice .voice-chat-panel .message-meta { margin-bottom: 6px; color: var(--voice-muted); font-size: 12px; }
+.app-shell.immersive-voice .voice-chat-panel .message-meta strong { color: var(--voice-muted); font-weight: 550; font-size: 12px; }
+.app-shell.immersive-voice .voice-chat-panel .message-actions { margin-top: 8px; gap: 11px; }
+.app-shell.immersive-voice .voice-chat-panel :is(.message-actions > button, .message-duration) { color: var(--voice-muted); font-size: 12px; }
+.app-shell.immersive-voice .voice-chat-panel .message-actions > button:hover:not(:disabled) { color: var(--voice-text); }
+.app-shell.immersive-voice .voice-chat-panel .processing-message { padding: 8px 0 16px; color: var(--voice-muted); }
+.app-shell.immersive-voice .voice-focused .voice-chat-panel .composer { padding: 16px 0 0; border: 0; background: transparent; }
+.app-shell.immersive-voice .voice-chat-panel .conversation-tools { margin-bottom: 8px; color: var(--voice-muted); }
+.app-shell.immersive-voice .voice-chat-panel .text-composer { min-height: 48px; padding: 7px 8px 7px 12px; background: transparent; border: 1px solid var(--voice-line); border-radius: 14px; box-shadow: none; }
+.app-shell.immersive-voice .voice-chat-panel .text-composer:focus-within { border-color: #599674; }
+.app-shell.immersive-voice .voice-chat-panel .text-composer textarea { min-height: 27px; max-height: 120px; color: var(--voice-text); font-size: 15px; resize: vertical; }
+.app-shell.immersive-voice .voice-chat-panel .text-composer textarea::placeholder { color: var(--voice-muted); }
+.app-shell.immersive-voice .voice-chat-panel .composer-footnote { justify-content: flex-start; flex-wrap: wrap; gap: 4px 10px; margin-top: 9px; color: var(--voice-muted); font-size: 12px; line-height: 1.6; }
+.app-shell.immersive-voice .voice-chat-panel .composer-footnote > span:first-child { display: none; }
+.app-shell.immersive-voice .voice-chat-panel .composer > .tiny { color: var(--voice-muted); }
+
+/* Optional context and trace float above the transcript without moving the stage. */
+.app-shell.immersive-voice .immersive-layout > :is(.context-rail, .trace-drawer) {
+  position: absolute;
+  z-index: 25;
+  top: 56px;
+  right: 0;
+  bottom: 0;
+  width: min(360px, 100%);
+  height: auto;
+  max-height: none;
+  min-height: 0;
+  border: 1px solid var(--voice-line);
+  border-radius: 16px;
+  background: var(--voice-drawer);
+  box-shadow: -10px 8px 40px var(--voice-shadow);
+  backdrop-filter: blur(18px);
+}
+.app-shell.immersive-voice .immersive-layout > .context-rail { padding: 0 16px; }
+.app-shell.immersive-voice .context-rail > header > strong { color: var(--voice-text); }
+.app-shell.immersive-voice .context-card { padding: 14px 0; margin: 0; background: transparent; border: 0; border-bottom: 1px solid var(--voice-line); border-radius: 0; }
+.app-shell.immersive-voice .context-card :is(h3, strong) { color: var(--voice-text); }
+.app-shell.immersive-voice .context-card :is(p, small, .rail-label), .app-shell.immersive-voice .context-rail-footer { color: var(--voice-muted); }
+.app-shell.immersive-voice .context-confirmation .rail-label { color: var(--amber); }
+.app-shell.immersive-voice .trace-drawer > header { background: transparent; color: var(--voice-text); border: 0; border-bottom: 1px solid var(--voice-line); border-radius: 0; padding: 13px 15px; }
+.app-shell.immersive-voice .trace-drawer > .trace-panel { background: transparent; border: 0; border-radius: 0; max-height: none; min-height: 0; }
+
+@media (min-width: 1001px) {
+  .app-shell.immersive-voice .sidebar { background: var(--voice-canvas); border-color: var(--voice-line); }
+}
+@media (min-width: 901px) and (max-height: 760px) {
+  .app-shell.immersive-voice .conversation-panel.voice-focused .voice-stage { padding-bottom: 8px; gap: 2px; }
+  .app-shell.immersive-voice .voice-focused .voice-stage > .voice-particles { height: min(49dvh, 400px) !important; max-height: min(49dvh, 400px); flex-basis: min(49dvh, 400px); }
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy { gap: 5px; }
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy > strong { font-size: 21px; }
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy > .voice-control-buttons { margin-top: 9px; }
+}
+@media (min-width: 901px) and (max-width: 1100px) {
+  .app-shell.immersive-voice .voice-chat-panel { width: min(330px, 100%); }
+}
+@media (max-width: 1000px) and (min-width: 901px) {
+  .app-shell.immersive-voice { display: flex; flex-direction: column; height: var(--voice-viewport-height, 100dvh); overflow: hidden; }
+  .app-shell.immersive-voice > .main-shell { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .app-shell.immersive-voice .main-content.view-conversation { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .app-shell.immersive-voice .conversation-layout.immersive-layout { flex: 1; }
+  .app-shell.immersive-voice .voice-focused .voice-stage > .voice-particles { height: min(calc(var(--voice-viewport-height, 100dvh) * .49), 400px) !important; max-height: min(calc(var(--voice-viewport-height, 100dvh) * .49), 400px); flex-basis: min(calc(var(--voice-viewport-height, 100dvh) * .49), 400px); }
+}
+@media (max-width: 900px) {
+  .app-shell.immersive-voice { display: flex; flex-direction: column; height: var(--voice-viewport-height, 100dvh); min-height: 0; overflow: hidden; }
+  .app-shell.immersive-voice > .main-shell { display: flex; flex-direction: column; flex: 1; width: 100%; height: 100%; min-height: 0; margin-left: 0; overflow: hidden; }
+  .app-shell.immersive-voice .sidebar { position: fixed; z-index: 40; inset: 60px 12px auto; width: calc(100% - 24px); max-height: calc(var(--voice-viewport-height, 100dvh) - 84px); padding: 14px; border: 1px solid var(--voice-line); border-radius: 12px; overflow-y: auto; background: var(--voice-canvas); box-shadow: 0 10px 30px var(--voice-shadow); }
+  .app-shell.immersive-voice .topbar { padding: max(4px, env(safe-area-inset-top)) 12px 4px; height: auto; min-height: 54px; flex-wrap: nowrap; gap: 6px; }
+  .app-shell.immersive-voice .topbar :is(.breadcrumb, .connection-status) { display: none; }
+  .app-shell.immersive-voice .topbar-right { flex-wrap: nowrap; gap: 4px; margin-left: auto; }
+  .app-shell.immersive-voice .topbar :is(.button, .icon-button) { min-height: 44px; font-size: 13px; }
+  .app-shell.immersive-voice .topbar .icon-button { width: 44px; }
+  .app-shell.immersive-voice .topbar .theme-toggle { padding: 8px 10px; }
+  .app-shell.immersive-voice .main-content.view-conversation, .app-shell.immersive-voice .workspace-main { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 0 12px; overflow: hidden; }
+  .app-shell.immersive-voice .conversation-layout.immersive-layout { flex: 1; min-height: 0; }
+  .app-shell.immersive-voice .conversation-panel.voice-focused { height: 100%; min-height: 0; max-height: none; overflow: hidden; }
+  .app-shell.immersive-voice .voice-focused .conversation-heading { flex-wrap: wrap; gap: 6px; padding: 8px 0 10px; }
+  .app-shell.immersive-voice .conversation-title { flex-basis: 100%; margin-bottom: 2px; }
+  .app-shell.immersive-voice .conversation-title > span { font-size: 12px; }
+  .app-shell.immersive-voice .conversation-heading :is(.button, .icon-button) { min-height: 40px; font-size: 12px; padding: 8px 10px; }
+  .app-shell.immersive-voice .conversation-heading .icon-button { width: 36px; padding: 8px; }
+  .app-shell.immersive-voice .voice-conversation-space { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; flex: 1; min-height: 0; }
+  .app-shell.immersive-voice .conversation-panel.voice-focused .voice-stage { height: 100%; min-height: 0; padding: 0 0 calc(180px + env(safe-area-inset-bottom)); gap: 0; overflow: hidden; }
+  .app-shell.immersive-voice .voice-focused .voice-stage > .voice-particles { width: min(540px, 100%) !important; height: min(calc(var(--voice-viewport-height, 100dvh) * .45), 370px) !important; max-height: 100%; min-height: 0; flex: 0 1 min(calc(var(--voice-viewport-height, 100dvh) * .45), 370px); }
+  .app-shell.immersive-voice .voice-conversation-space:has(> .voice-chat-panel) .voice-particles { opacity: .22; }
+  /* Fixed controls use the layout viewport; absolute chat already follows the resized app. */
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy { position: fixed; z-index: 20; left: 16px; right: 16px; bottom: calc(12px + env(safe-area-inset-bottom) + var(--voice-keyboard-inset, 0px)); width: auto; max-width: none; padding: 0; gap: 5px; }
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy > strong { font-size: 18px; line-height: 1.3; }
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy > span { max-width: 480px; font-size: 14px; line-height: 1.45; }
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy > .voice-control-buttons { width: min(520px, 100%); margin: 8px 0 0; gap: 8px; flex-wrap: nowrap; }
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy .voice-control-buttons > button { flex: 1 1 0; min-width: 0; min-height: 48px; padding: 10px 12px; font-size: 14px; line-height: 1.35; }
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy > .mic-level { margin-top: 5px; }
+  .app-shell.immersive-voice .voice-chat-panel { top: 0; right: 0; bottom: calc(180px + env(safe-area-inset-bottom)); width: min(380px, 100%); height: auto; min-height: 0; padding: 0; border: 0; }
+  .app-shell.immersive-voice .voice-chat-panel .conversation-empty { padding-top: 16px; }
+  .app-shell.immersive-voice .voice-focused .voice-chat-panel .composer { max-height: 58%; min-height: 0; padding-top: 10px; overflow-y: auto; }
+  .app-shell.immersive-voice .voice-chat-panel .transcript-toolbar { font-size: 14px; }
+  .app-shell.immersive-voice .voice-chat-panel .transcript-toolbar button { font-size: 14px; }
+  .app-shell.immersive-voice .voice-chat-panel :is(.message, .message-assistant .message-bubble, .text-composer textarea) { font-size: 16px; }
+  .app-shell.immersive-voice .voice-chat-panel :is(.message-meta, .message-meta strong, .message-actions > button, .message-duration, .composer-footnote) { font-size: 14px; }
+  .app-shell.immersive-voice :is(input, textarea, select) { font-size: 16px; }
+  .app-shell.immersive-voice .immersive-layout > :is(.context-rail, .trace-drawer) { position: fixed; top: 64px; right: 12px; bottom: calc(180px + env(safe-area-inset-bottom) + var(--voice-keyboard-inset, 0px)); width: min(360px, calc(100% - 24px)); max-height: none; }
+}
+@media (max-height: 500px) and (max-width: 1000px) {
+  .app-shell.immersive-voice .topbar { min-height: 44px; padding-top: 0; padding-bottom: 0; }
+  .app-shell.immersive-voice .voice-focused .conversation-heading { min-height: 46px; flex-wrap: nowrap; padding: 3px 0 7px; }
+  .app-shell.immersive-voice .conversation-title { flex-basis: auto; margin: 0; }
+  .app-shell.immersive-voice .conversation-title h2 { font-size: 14px; }
+  .app-shell.immersive-voice .conversation-title > span { display: none; }
+  .app-shell.immersive-voice .conversation-panel.voice-focused .voice-stage { min-height: 0; padding-bottom: calc(104px + env(safe-area-inset-bottom)); }
+  .app-shell.immersive-voice .voice-focused .voice-stage > .voice-particles { height: min(calc(var(--voice-viewport-height, 100dvh) * .42), 210px) !important; max-height: 100%; min-height: 0; flex: 0 1 min(calc(var(--voice-viewport-height, 100dvh) * .42), 210px); }
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy { position: fixed; left: 16px; right: 16px; bottom: calc(8px + env(safe-area-inset-bottom) + var(--voice-keyboard-inset, 0px)); width: auto; max-width: none; gap: 3px; }
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy > strong { font-size: 15px; }
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy > span { display: none; }
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy > .voice-control-buttons { width: min(480px, 100%); margin-top: 4px; flex-wrap: nowrap; }
+  .app-shell.immersive-voice .voice-focused .voice-stage-copy .voice-control-buttons > button { flex: 1 1 0; min-height: 48px; font-size: 14px; padding: 9px 12px; }
+  .app-shell.immersive-voice .voice-chat-panel { top: 0; bottom: calc(104px + env(safe-area-inset-bottom)); width: min(360px, 48%); height: auto; min-height: 0; }
+  .app-shell.immersive-voice .voice-chat-panel .transcript-toolbar { min-height: 32px; padding-bottom: 6px; }
+  .app-shell.immersive-voice .voice-focused .voice-chat-panel .composer { max-height: 58%; min-height: 0; overflow-y: auto; padding-top: 6px; }
+  .app-shell.immersive-voice :is(input, textarea, select), .app-shell.immersive-voice .voice-chat-panel .text-composer textarea { font-size: 16px; }
+  .app-shell.immersive-voice .immersive-layout > :is(.context-rail, .trace-drawer) { position: fixed; top: 48px; bottom: calc(104px + env(safe-area-inset-bottom) + var(--voice-keyboard-inset, 0px)); width: min(360px, calc(100% - 24px)); max-height: none; }
+}
+@media (max-height: 500px) and (max-width: 600px) {
+  .app-shell.immersive-voice .voice-chat-panel { width: 100%; }
+}
+/* Safari can keep the layout height while shrinking only visualViewport. */
+@media (max-width: 900px) {
+  html[data-voice-compact="true"] .app-shell.immersive-voice .topbar { min-height: 44px; padding-top: 0; padding-bottom: 0; }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .voice-focused .conversation-heading { min-height: 46px; flex-wrap: nowrap; padding: 3px 0 7px; }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .conversation-title { flex-basis: auto; margin: 0; }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .conversation-title h2 { font-size: 14px; }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .conversation-title > span { display: none; }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .conversation-panel.voice-focused .voice-stage { min-height: 0; padding-bottom: calc(104px + env(safe-area-inset-bottom)); }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .voice-focused .voice-stage > .voice-particles { height: min(calc(var(--voice-viewport-height, 100dvh) * .42), 210px) !important; max-height: 100%; min-height: 0; flex: 0 1 min(calc(var(--voice-viewport-height, 100dvh) * .42), 210px); }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .voice-focused .voice-stage-copy { position: fixed; left: 16px; right: 16px; bottom: calc(8px + env(safe-area-inset-bottom) + var(--voice-keyboard-inset, 0px)); width: auto; max-width: none; gap: 3px; }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .voice-focused .voice-stage-copy > strong { font-size: 15px; }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .voice-focused .voice-stage-copy > span { display: none; }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .voice-focused .voice-stage-copy > .voice-control-buttons { width: min(480px, 100%); margin-top: 4px; flex-wrap: nowrap; }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .voice-focused .voice-stage-copy .voice-control-buttons > button { flex: 1 1 0; min-height: 48px; font-size: 14px; padding: 9px 12px; }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .voice-chat-panel { top: 0; bottom: calc(104px + env(safe-area-inset-bottom)); width: min(360px, 48%); height: auto; min-height: 0; }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .voice-chat-panel .transcript-toolbar { min-height: 32px; padding-bottom: 6px; }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .voice-focused .voice-chat-panel .composer { max-height: 58%; min-height: 0; overflow-y: auto; padding-top: 6px; }
+  html[data-voice-compact="true"] .app-shell.immersive-voice .immersive-layout > :is(.context-rail, .trace-drawer) { position: fixed; top: 48px; bottom: calc(104px + env(safe-area-inset-bottom) + var(--voice-keyboard-inset, 0px)); width: min(360px, calc(100% - 24px)); max-height: none; }
+}
+@media (max-width: 600px) {
+  html[data-voice-compact="true"] .app-shell.immersive-voice .voice-chat-panel { width: 100%; }
+}

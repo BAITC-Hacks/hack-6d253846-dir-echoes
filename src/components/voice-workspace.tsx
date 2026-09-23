@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDownToLine, ArrowRight, AudioLines, BookOpen, Check, ChevronRight, CircleHelp, Clock3, GitBranch, Headphones, History, LockKeyhole, LogOut, MessageSquare, Mic, Moon, Phone, PhoneOff, Plus, RefreshCw, ShieldCheck, Square, Sun, Volume2, VolumeX, X } from "lucide-react";
+import { ArrowDownToLine, ArrowRight, AudioLines, BookOpen, Check, ChevronRight, CircleHelp, Clock3, GitBranch, Headphones, History, LockKeyhole, LogOut, Menu, MessageSquare, Mic, Moon, Phone, PhoneOff, Plus, RefreshCw, ShieldCheck, Square, Sun, Volume2, VolumeX, X } from "lucide-react";
 import type { Role, SessionDetail, Turn } from "@/lib/types";
-import { createAudioPlayback } from "@/lib/audio-playback";
+import { createAudioPlayback, createPersistentAudio, unlockAudioPlayback } from "@/lib/audio-playback";
 import { useVoiceCall } from "@/lib/use-voice-call";
+import { usePlaybackMeter } from "@/lib/use-playback-meter";
 import { CatalogView, HistoryView, OperatorsView, TracePanel } from "./workspace-panels";
 import { SupervisorDashboard } from "./supervisor-tools";
 import { VoiceParticles } from "./voice-particles";
@@ -40,12 +41,15 @@ export function VoiceWorkspace() {
   const [audioLoadingId, setAudioLoadingId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [traceOpen, setTraceOpen] = useState(false);
-  const [remindersOpen, setRemindersOpen] = useState(true);
+  const [remindersOpen, setRemindersOpen] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  const [showChat, setShowChat] = useState(false);
   const [transcriptExpanded, setTranscriptExpanded] = useState(false);
-  const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [theme, setTheme] = useState<"light" | "dark">("dark");
   const voiceGenerationRef = useRef(0);
   const transcribeAbortRef = useRef<AbortController | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const persistentAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
   const audioAbortRef = useRef<AbortController | null>(null);
   const speechSequenceRef = useRef(0);
@@ -64,6 +68,7 @@ export function VoiceWorkspace() {
   const detailRef = useRef<SessionDetail | null>(null);
   const mountedRef = useRef(true);
   const stopCallRef = useRef<() => void>(() => {});
+  const playbackMeter = usePlaybackMeter();
   const voiceCall = useVoiceCall({
     paused: phase !== null || playingTurnId !== null || audioLoadingId !== null || loadingSession || operatorBusy || view !== "conversation" || helpOpen || !authenticated,
     onUtterance: (blob, mime, speechEndedAt) => transcribe(blob, mime, speechEndedAt),
@@ -72,18 +77,15 @@ export function VoiceWorkspace() {
   stopCallRef.current = stopVoiceCall;
 
   useEffect(() => {
-    const preference = window.matchMedia("(prefers-color-scheme: dark)");
     const applyPreference = () => {
       let saved: string | null = null;
       try { saved = localStorage.getItem(THEME_KEY); } catch { /* Theme still works without storage. */ }
-      const selected = saved === "dark" || saved === "light" ? saved : preference.matches ? "dark" : "light";
+      const selected = saved === "dark" || saved === "light" ? saved : "dark";
       document.documentElement.dataset.theme = selected;
       setTheme(selected);
     };
     applyPreference();
     if (window.matchMedia("(max-width: 900px)").matches) setRemindersOpen(false);
-    preference.addEventListener("change", applyPreference);
-    return () => preference.removeEventListener("change", applyPreference);
   }, []);
 
   function toggleTheme() {
@@ -144,6 +146,12 @@ export function VoiceWorkspace() {
       transcribeAbortRef.current?.abort();
       audioRef.current?.pause();
       audioAbortRef.current?.abort();
+      if (persistentAudioRef.current) {
+        const audio = persistentAudioRef.current;
+        audio.onended = null; audio.onplaying = null; audio.onerror = null;
+        audio.pause(); audio.removeAttribute("src"); audio.load();
+        persistentAudioRef.current = null;
+      }
       if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
     };
   }, [initialize]);
@@ -192,7 +200,10 @@ export function VoiceWorkspace() {
   function stopAudio() {
     speechSequenceRef.current += 1;
     audioAbortRef.current?.abort(); audioAbortRef.current = null;
-    audioRef.current?.pause(); audioRef.current = null;
+    if (audioRef.current) {
+      audioRef.current.onended = null; audioRef.current.onplaying = null; audioRef.current.onerror = null;
+      audioRef.current.pause(); audioRef.current = null;
+    }
     if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
     audioUrlRef.current = null;
     setPlayingTurnId(null); setAudioLoadingId(null);
@@ -212,9 +223,48 @@ export function VoiceWorkspace() {
     setView(next);
   }
 
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    const updateViewport = () => {
+      // Safari may resize only its visual viewport when the keyboard opens.
+      // Preserve pinch zoom instead of treating it as a keyboard resize.
+      const usable = viewport && Math.abs(viewport.scale - 1) < 0.05;
+      const height = usable ? viewport.height : window.innerHeight;
+      const inset = usable ? Math.max(0, window.innerHeight - height - viewport.offsetTop) : 0;
+      document.documentElement.style.setProperty("--voice-viewport-height", `${Math.round(height)}px`);
+      document.documentElement.style.setProperty("--voice-keyboard-inset", `${Math.round(inset)}px`);
+      document.documentElement.dataset.voiceCompact = String(height <= 500);
+    };
+    updateViewport();
+    viewport?.addEventListener("resize", updateViewport);
+    viewport?.addEventListener("scroll", updateViewport);
+    window.addEventListener("resize", updateViewport);
+    return () => {
+      viewport?.removeEventListener("resize", updateViewport);
+      viewport?.removeEventListener("scroll", updateViewport);
+      window.removeEventListener("resize", updateViewport);
+      document.documentElement.style.removeProperty("--voice-viewport-height");
+      document.documentElement.style.removeProperty("--voice-keyboard-inset");
+      delete document.documentElement.dataset.voiceCompact;
+    };
+  }, []);
+
+  function prepareAudioGesture() {
+    const audio = persistentAudioRef.current ??= createPersistentAudio();
+    playbackMeter.prepare(audio);
+    // Called directly from a click/keyboard handler, before network awaits.
+    void unlockAudioPlayback(audio).catch(() => {});
+  }
+
+  function sendTextMessage() {
+    if (autoSpeakRef.current) { stopAudio(); prepareAudioGesture(); }
+    void sendTurn(draft, "text");
+  }
+
   async function startVoiceCall() {
     if (phase || submittingRef.current || loadingSession || operatorBusy || voiceCall.active || detailRef.current?.session.state.status === "closed" || detailRef.current?.session.state.status === "handoff") return;
     stopAudio(); setError(null);
+    prepareAudioGesture();
     voiceGenerationRef.current += 1;
     autoSpeakRef.current = true; setAutoSpeak(true);
     setTranscriptExpanded(false);
@@ -254,7 +304,7 @@ export function VoiceWorkspace() {
       const playback = await createAudioPlayback(response, controller.signal, () => {
         if (sequence !== speechSequenceRef.current || controller.signal.aborted) return;
         setError("Аудиопоток прервался. Текст ответа сохранён."); stopVoiceCall();
-      });
+      }, persistentAudioRef.current ??= createPersistentAudio());
       const { audio, url } = playback;
       if (sequence !== speechSequenceRef.current || controller.signal.aborted || detailRef.current?.session.id !== sessionId) { audio.pause(); URL.revokeObjectURL(url); return; }
       audioUrlRef.current = url;
@@ -287,6 +337,7 @@ export function VoiceWorkspace() {
       if (controller.signal.aborted || sequence !== speechSequenceRef.current) return;
       stopVoiceCall();
       if (err instanceof ApiError && err.status === 401) { handleError(err); return; }
+      if (err instanceof DOMException && err.name === "NotAllowedError") setShowChat(true);
       setError(err instanceof DOMException && err.name === "NotAllowedError" ? "Браузер заблокировал автоматический звук. Нажмите «Слушать ответ» под сообщением." : readableError(err));
     } finally {
       if (sequence === speechSequenceRef.current) { setPhase(current => current === "synthesizing" ? null : current); setAudioLoadingId(null); }
@@ -391,7 +442,7 @@ export function VoiceWorkspace() {
 
   function useExample(text: string) {
     if (detailRef.current?.session.state.status === "closed") { setView("conversation"); setError("Этот разговор завершён. Создайте новый разговор, затем выберите пример."); return; }
-    setView("conversation"); setDraft(text); requestAnimationFrame(() => textareaRef.current?.focus());
+    setView("conversation"); setShowChat(true); setDraft(text); requestAnimationFrame(() => textareaRef.current?.focus());
   }
 
   if (booting) return <main className="boot-screen"><Logo /><Spinner label="Подключаем рабочее пространство…" /></main>;
@@ -404,12 +455,12 @@ export function VoiceWorkspace() {
   const canSendText = currentSession?.state.status !== "closed" && bootstrap.configured.database && (bootstrap.configured.ai || currentSession?.state.status === "handoff");
   const pendingCount = bootstrap.handoffs.filter(h => h.status !== "closed").length;
   const title = viewCopy[view];
-  const exampleScenarios = bootstrap.catalog.filter(s => s.examples.ru.length > 0).slice(0, 3);
+
   const phaseLabel = phase === "transcribing" ? "Распознаём речь" : phase === "routing" ? "Выбираем сценарий и готовим ответ" : phase === "synthesizing" ? "Подготавливаем голосовой ответ" : "Готовы слушать";
 
-  const callLabel = phase === "transcribing" ? "Распознаю вашу фразу" : phase === "routing" ? "Разбираюсь в вопросе" : phase === "synthesizing" ? "Готовлю голосовой ответ" : playingTurnId ? "AI отвечает" : voiceCall.status === "requesting" ? "Разрешите доступ к микрофону" : voiceCall.status === "speaking" ? "Слушаю вас" : voiceCall.active ? "Говорите, я слушаю" : "Голосовой разговор";
-  const callHint = voiceCall.active ? playingTurnId ? "После ответа микрофон снова включится" : phase ? "Текст и решение появятся в истории" : voiceCall.status === "requesting" ? "Микрофон включается только с вашего разрешения" : "Сделайте паузу в конце фразы — ответ придёт автоматически" : currentSession?.state.status === "handoff" ? "Продолжите общение с оператором текстом" : currentSession?.state.status === "closed" ? "Для нового обращения создайте разговор" : "Нажмите один раз и общайтесь без отправки каждой реплики";
-  const particleMode = error ? "error" : playingTurnId ? "replying" : phase || voiceCall.status === "processing" || voiceCall.status === "requesting" ? "processing" : voiceCall.status === "speaking" ? "speaking" : voiceCall.active ? "listening" : "idle";
+  const callLabel = phase === "transcribing" ? "Распознаю вашу фразу" : phase === "routing" ? "Разбираюсь в вопросе" : phase === "synthesizing" ? "Готовлю голосовой ответ" : playingTurnId ? "AI отвечает" : voiceCall.status === "requesting" ? "Разрешите доступ к микрофону" : voiceCall.status === "calibrating" ? "Настраиваю микрофон" : voiceCall.status === "settling" ? "Включаю микрофон" : voiceCall.status === "speaking" ? "Слушаю вас" : voiceCall.active ? "Говорите, я слушаю" : "Голосовой разговор";
+  const callHint = voiceCall.active ? playingTurnId ? "После ответа микрофон снова включится" : phase ? "Текст и решение появятся в истории" : voiceCall.status === "requesting" ? "Микрофон включается только с вашего разрешения" : voiceCall.status === "calibrating" || voiceCall.status === "settling" ? "Подождите появления надписи «Говорите»" : "Сделайте паузу в конце фразы — ответ придёт автоматически" : currentSession?.state.status === "handoff" ? "Продолжите общение с оператором текстом" : currentSession?.state.status === "closed" ? "Для нового обращения создайте разговор" : "Нажмите один раз и общайтесь без отправки каждой реплики";
+  const particleMode = error ? "error" : playingTurnId ? "replying" : phase || voiceCall.status === "processing" || voiceCall.status === "requesting" || voiceCall.status === "calibrating" || voiceCall.status === "settling" ? "processing" : voiceCall.status === "speaking" ? "speaking" : voiceCall.active ? "listening" : "idle";
 
   const callControls = <>
     <div className="voice-control-buttons">
@@ -419,8 +470,8 @@ export function VoiceWorkspace() {
     {voiceCall.active && <div className="mic-level" role="meter" aria-label="Уровень микрофона" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(voiceCall.micLevel * 100)}><span style={{ transform: `scaleX(${voiceCall.micLevel})` }} /></div>}
   </>;
 
-  return <div className={`app-shell view-${view}`}>
-    <aside className="sidebar"><div className="sidebar-brand"><Logo /></div><div className="workspace-label"><span className="workspace-avatar">DE</span><div>Контакт-центр<span>Рабочее пространство</span></div><span className="workspace-online" title="Рабочее пространство загружено" /></div>
+  return <div className={`app-shell view-${view} ${view === "conversation" ? `immersive-voice ${navigationOpen ? "" : "nav-hidden"}` : ""}`}>
+    <aside className="sidebar" id="workspace-navigation"><div className="sidebar-brand"><Logo /></div><div className="workspace-label"><span className="workspace-avatar">DE</span><div>Контакт-центр<span>Рабочее пространство</span></div><span className="workspace-online" title="Рабочее пространство загружено" /></div>
       <div className="sidebar-section-label">РАБОТА С ОБРАЩЕНИЯМИ</div><nav className="primary-nav" aria-label="Основная навигация">
         <NavItem icon={<AudioLines size={19} />} label="Разговор с AI" active={view === "conversation"} disabled={busy} onClick={() => navigateView("conversation")} />
         <NavItem icon={<History size={19} />} label="История" count={bootstrap.sessions.length} active={view === "history"} disabled={busy} onClick={() => navigateView("history")} />
@@ -429,27 +480,28 @@ export function VoiceWorkspace() {
         {bootstrap.viewer.role === "supervisor" && <NavItem icon={<ShieldCheck size={19} />} label="Супервизор" active={view === "supervision"} disabled={busy} onClick={() => navigateView("supervision")} />}
       </nav><div className="sidebar-bottom"><div className="sidebar-note"><span className="sidebar-note-icon"><GitBranch size={18} /></span><strong>Голос. Контекст. Решение.</strong><p>Одна линия для обращений на русском, казахском и турецком.</p><span className="sidebar-languages">RU <span /> KZ <span /> TR</span></div><button ref={helpButtonRef} className="sidebar-help" onClick={() => { stopVoiceCall(); setHelpOpen(true); }}><CircleHelp size={18} />Как работать с линией<ChevronRight size={14} /></button><div className="sidebar-profile"><span className="profile-avatar">{bootstrap.viewer.role === "supervisor" ? "С" : "У"}</span><span><strong>{bootstrap.viewer.role === "supervisor" ? "Супервизор" : "Участник"}</strong><small>Защищённый доступ</small></span><button onClick={() => void logout()} disabled={busy} aria-label="Выйти" title="Выйти"><LogOut size={16} /></button></div></div>
     </aside>
-    <div className="main-shell"><header className="topbar"><div className="breadcrumb"><span>Контакт-центр</span><ChevronRight size={13} /><strong>{title.title}</strong></div><div className="topbar-right"><ThemeToggle theme={theme} onToggle={toggleTheme} /><span className={`connection-status ${bootstrap.configured.database && bootstrap.configured.ai ? "" : "connection-warning"}`}><i />{bootstrap.configured.database && bootstrap.configured.ai ? "Система подключена" : "Требуется настройка"}</span><span className="topbar-divider" /><button className="icon-button" onClick={() => void refresh()} disabled={busy || refreshing} aria-label="Обновить данные" title="Обновить данные"><RefreshCw size={17} className={refreshing ? "spin" : ""} /></button><span className="topbar-product">VOICE ROUTER <span>01</span></span></div></header>
+    <div className="main-shell"><header className="topbar">{view === "conversation" && <button className="button button-ghost navigation-toggle" onClick={() => setNavigationOpen(open => !open)} aria-expanded={navigationOpen} aria-controls="workspace-navigation"><Menu size={18} /><span>Меню</span></button>}<div className="breadcrumb"><span>Контакт-центр</span><ChevronRight size={13} /><strong>{title.title}</strong></div><div className="topbar-right"><ThemeToggle theme={theme} onToggle={toggleTheme} /><span className={`connection-status ${bootstrap.configured.database && bootstrap.configured.ai ? "" : "connection-warning"}`}><i />{bootstrap.configured.database && bootstrap.configured.ai ? "Система подключена" : "Требуется настройка"}</span><span className="topbar-divider" /><button className="icon-button" onClick={() => void refresh()} disabled={busy || refreshing} aria-label="Обновить данные" title="Обновить данные"><RefreshCw size={17} className={refreshing ? "spin" : ""} /></button><span className="topbar-product">VOICE ROUTER <span>01</span></span></div></header>
       <main className={`main-content view-${view}`} id="main-content"><div className="page-heading"><div><div className="page-eyebrow"><span /> DIR ECHOES / VOICE OPERATIONS</div><h1>{title.title}</h1><p>{title.subtitle}</p></div><button className="button button-primary new-conversation" onClick={() => void newSession()} disabled={busy}>{loadingSession ? <Spinner /> : <Plus size={17} />}Новый разговор</button></div>
         <div className="stats-grid"><Stat label="Разговоров" value={bootstrap.stats.sessions} icon={<MessageSquare size={17} />} note="В вашем рабочем пространстве" /><Stat label="Обработано реплик" value={bootstrap.stats.turns} icon={<AudioLines size={17} />} note="С сохранённым результатом" /><Stat label="У оператора" value={bootstrap.stats.handoffs} icon={<Headphones size={17} />} note="Открытые обращения с контекстом" /><Stat label="Выбор маршрута" value={bootstrap.stats.turns ? duration(bootstrap.stats.medianRoutingMs) : "—"} icon={<GitBranch size={17} />} note="Медиана времени маршрутизации" /></div>
         {error && <div className="global-error"><ErrorNotice message={error} onDismiss={() => setError(null)} /></div>}
         {(!bootstrap.configured.ai || !bootstrap.configured.database) && <div className="configuration-notice"><ShieldCheck size={17} /><span>{!bootstrap.configured.database ? "Хранилище не подключено. Сохранение разговоров недоступно." : "AI-сервис не подключён. Обработка новых обращений пока недоступна."}</span></div>}
-        {view === "conversation" ? <div className={`conversation-layout ${traceOpen ? "trace-open" : ""}`}><section className={`conversation-panel voice-focused ${transcriptExpanded ? "transcript-expanded" : ""}`} aria-label="Разговор"><div className="conversation-heading"><span className="conversation-heading-icon"><AudioLines size={21} /></span><div className="conversation-title"><h2>{currentSession?.title || "Новый разговор"}</h2><span>{currentSession ? <><i className={`state-dot state-${currentSession.state.status}`} />{sessionStatus(currentSession.state.status)}<span className="dot-separator">·</span>{languageLabel(currentSession.state.language, currentSession.state.responseLanguages)}</> : <>Готовы к первому обращению<span className="dot-separator">·</span>RU / KZ / TR</>}</span></div><button className="button button-secondary conversation-new" onClick={() => void newSession()} disabled={busy} title="Создать новый разговор"><Plus size={16} /><span>Новый разговор</span></button>{currentSession && <a href={`/api/sessions/${currentSession.id}/export`} download className="icon-button" aria-label="Скачать историю разговора в JSON" title="Скачать историю в JSON"><ArrowDownToLine size={18} /></a>}<button ref={traceToggleRef} className="button button-secondary trace-toggle" onClick={() => { if (traceOpen || remindersOpen) { setTraceOpen(false); setRemindersOpen(false); } else setRemindersOpen(true); }} aria-expanded={traceOpen || remindersOpen} aria-controls={traceOpen ? "response-logic" : "conversation-details"}><GitBranch size={16} />Подсказки</button><button className={`icon-button ${autoSpeak ? "audio-enabled" : ""}`} onClick={() => { autoSpeakRef.current = !autoSpeakRef.current; setAutoSpeak(autoSpeakRef.current); if (!autoSpeakRef.current) stopVoiceCall(); }} aria-label={autoSpeak ? "Выключить автоматическое озвучивание" : "Включить автоматическое озвучивание"} aria-pressed={autoSpeak} title={autoSpeak ? "Автоматическое озвучивание включено" : "Автоматическое озвучивание выключено"}>{autoSpeak ? <Volume2 size={18} /> : <VolumeX size={18} />}</button></div>
-          <div className="voice-stage" data-active={voiceCall.active || undefined}><VoiceParticles mode={particleMode} level={voiceCall.micLevel} theme={theme} /><div className="voice-stage-copy"><strong role="status" aria-live="polite">{callLabel}</strong><span>{callHint}</span>{callControls}</div></div>
-          {!!detail?.turns.length && <div className="transcript-toolbar"><span>{transcriptExpanded ? "Весь разговор" : "Последняя реплика"}</span>{transcriptExpanded && voiceCall.active && <button className="transcript-end-call" onClick={stopVoiceCall}><PhoneOff size={14} />Завершить звонок</button>}<button onClick={() => setTranscriptExpanded(open => !open)}>{transcriptExpanded ? "Вернуться к голосу" : `Весь разговор · ${detail.turns.length}`}</button></div>}
-          <div className="conversation-body" aria-live="polite" aria-relevant="additions text">{loadingSession ? <div className="conversation-loading"><Spinner label="Открываем разговор…" /></div> : !detail?.turns.length ? <div className="conversation-empty"><div className="starter-label">МОЖНО СПРОСИТЬ</div><div className="conversation-starters">{exampleScenarios.map(s => <button disabled={busy} key={s.scenario_id} onClick={() => useExample(s.examples.ru[0])}><span>{s.examples.ru[0]}</span><ArrowRight size={15} /></button>)}</div></div> : <div className="messages"><div className="conversation-date"><span>{new Date(detail.session.createdAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long" })}</span></div>{visibleTurns.map((turn) => <div className="turn-group" key={turn.id}>{turn.mode !== "operator" && turn.userText && <div className="message message-user"><div className="message-meta"><span>{bootstrap.viewer.role === "supervisor" ? "Клиент" : "Вы"}</span><time>{time(turn.createdAt)}</time>{turn.mode === "voice" && <Mic size={12} />}</div><div className="message-bubble">{turn.userText}</div></div>}<div className={`message message-assistant ${selectedTurnId === turn.id ? "message-selected" : ""}`}><span className="assistant-avatar">{turn.mode === "operator" ? <Headphones size={16} /> : <AudioLines size={17} />}</span><div className="assistant-message-content"><div className="message-meta"><strong>{turn.mode === "operator" ? "Оператор" : "DIR ECHOES"}</strong><span>{turn.mode === "operator" ? "Человек в диалоге" : turn.trace.source === "operator" ? "Система" : "AI-ассистент"}</span></div><div className="message-bubble">{turn.assistantText}</div><div className="message-actions"><button onClick={() => { if (playingTurnId === turn.id || audioLoadingId === turn.id) stopAudio(); else void playSpeech(detail.session.id, turn); }} disabled={voiceCall.active || (busy && audioLoadingId !== turn.id)} aria-label={playingTurnId === turn.id ? "Остановить озвучивание" : "Слушать ответ"}>{audioLoadingId === turn.id ? <Spinner /> : playingTurnId === turn.id ? <Square size={12} fill="currentColor" /> : <Volume2 size={13} />}{audioLoadingId === turn.id ? "Подготовка…" : playingTurnId === turn.id ? "Остановить" : "Слушать ответ"}</button><button className={selectedTurnId === turn.id ? "selected" : ""} onClick={() => { setSelectedTurnId(turn.id); setTraceOpen(true); }}><GitBranch size={13} />Решение {detail.turns.indexOf(turn) + 1}<ChevronRight size={12} /></button><span className="message-duration"><Clock3 size={11} />{duration(turn.trace.timings.serverTotal)}</span></div></div></div></div>)}</div>}
+        {view === "conversation" ? <div className={`conversation-layout immersive-layout ${traceOpen ? "trace-open" : ""}`}><section className="conversation-panel voice-focused" aria-label="Разговор"><div className="conversation-heading"><span className="conversation-heading-icon"><AudioLines size={21} /></span><div className="conversation-title"><h2>{currentSession?.title || "Новый разговор"}</h2><span>{currentSession ? <><i className={`state-dot state-${currentSession.state.status}`} />{sessionStatus(currentSession.state.status)}<span className="dot-separator">·</span>{languageLabel(currentSession.state.language, currentSession.state.responseLanguages)}</> : <>Готовы к первому обращению<span className="dot-separator">·</span>RU / KZ / TR</>}</span></div><button className="button button-secondary conversation-new" onClick={() => void newSession()} disabled={busy} title="Создать новый разговор"><Plus size={16} /><span>Новый разговор</span></button>{currentSession && <a href={`/api/sessions/${currentSession.id}/export`} download className="icon-button" aria-label="Скачать историю разговора в JSON" title="Скачать историю в JSON"><ArrowDownToLine size={18} /></a>}<button className="button button-secondary chat-toggle" onClick={() => setShowChat(open => !open)} aria-expanded={showChat} aria-controls="voice-chat"><MessageSquare size={16} />Чат</button><button ref={traceToggleRef} className="button button-secondary trace-toggle" onClick={() => { if (traceOpen || remindersOpen) { setTraceOpen(false); setRemindersOpen(false); } else setRemindersOpen(true); }} aria-expanded={traceOpen || remindersOpen} aria-controls={traceOpen ? "response-logic" : "conversation-details"}><GitBranch size={16} />Подсказки</button><button className={`icon-button ${autoSpeak ? "audio-enabled" : ""}`} onClick={() => { autoSpeakRef.current = !autoSpeakRef.current; setAutoSpeak(autoSpeakRef.current); if (!autoSpeakRef.current) stopVoiceCall(); }} aria-label={autoSpeak ? "Выключить автоматическое озвучивание" : "Включить автоматическое озвучивание"} aria-pressed={autoSpeak} title={autoSpeak ? "Автоматическое озвучивание включено" : "Автоматическое озвучивание выключено"}>{autoSpeak ? <Volume2 size={18} /> : <VolumeX size={18} />}</button></div>
+          <div className="voice-conversation-space"><div className="voice-stage" data-active={voiceCall.active || undefined}><VoiceParticles mode={particleMode} level={voiceCall.micLevel} replyLevel={playbackMeter.level} callActive={voiceCall.active} theme={theme} variant="stage" /><div className="voice-stage-copy"><strong role="status" aria-live="polite">{callLabel}</strong><span>{callHint}</span>{callControls}</div></div>
+          {showChat && <aside className="voice-chat-panel" id="voice-chat" aria-label="Чат и расшифровка"><div className="transcript-toolbar"><span>Расшифровка</span>{!!detail?.turns.length && <button onClick={() => setTranscriptExpanded(open => !open)}>{transcriptExpanded ? "Последняя реплика" : `Весь разговор · ${detail.turns.length}`}</button>}<button className="icon-button" onClick={() => setShowChat(false)} aria-label="Скрыть чат"><X size={17} /></button></div>
+          <div className="conversation-body" aria-live="polite" aria-relevant="additions text">{loadingSession ? <div className="conversation-loading"><Spinner label="Открываем разговор…" /></div> : !detail?.turns.length ? <div className="conversation-empty"><MessageSquare size={22} /><h3>Здесь — ваш разговор</h3><p>Речь и ответы появятся автоматически. Можно также написать сообщение.</p></div> : <div className="messages"><div className="conversation-date"><span>{new Date(detail.session.createdAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long" })}</span></div>{visibleTurns.map((turn) => <div className="turn-group" key={turn.id}>{turn.mode !== "operator" && turn.userText && <div className="message message-user"><div className="message-meta"><span>{bootstrap.viewer.role === "supervisor" ? "Клиент" : "Вы"}</span><time>{time(turn.createdAt)}</time>{turn.mode === "voice" && <Mic size={12} />}</div><div className="message-bubble">{turn.userText}</div></div>}<div className={`message message-assistant ${selectedTurnId === turn.id ? "message-selected" : ""}`}><span className="assistant-avatar">{turn.mode === "operator" ? <Headphones size={16} /> : <AudioLines size={17} />}</span><div className="assistant-message-content"><div className="message-meta"><strong>{turn.mode === "operator" ? "Оператор" : "DIR ECHOES"}</strong><span>{turn.mode === "operator" ? "Человек в диалоге" : turn.trace.source === "operator" ? "Система" : "AI-ассистент"}</span></div><div className="message-bubble">{turn.assistantText}</div><div className="message-actions"><button onClick={() => { if (playingTurnId === turn.id || audioLoadingId === turn.id) stopAudio(); else { stopAudio(); prepareAudioGesture(); void playSpeech(detail.session.id, turn); } }} disabled={voiceCall.active || (busy && audioLoadingId !== turn.id)} aria-label={playingTurnId === turn.id ? "Остановить озвучивание" : "Слушать ответ"}>{audioLoadingId === turn.id ? <Spinner /> : playingTurnId === turn.id ? <Square size={12} fill="currentColor" /> : <Volume2 size={13} />}{audioLoadingId === turn.id ? "Подготовка…" : playingTurnId === turn.id ? "Остановить" : "Слушать ответ"}</button><button className={selectedTurnId === turn.id ? "selected" : ""} onClick={() => { setSelectedTurnId(turn.id); setTraceOpen(true); }}><GitBranch size={13} />Решение {detail.turns.indexOf(turn) + 1}<ChevronRight size={12} /></button><span className="message-duration"><Clock3 size={11} />{duration(turn.trace.timings.serverTotal)}</span></div></div></div></div>)}</div>}
           {phase && <div className="processing-message" role="status"><span className="assistant-avatar"><AudioLines size={17} /></span><Spinner label={phaseLabel} /></div>}<div ref={messageEndRef} /></div>
           {currentSession?.state.pendingConfirmation && <div className="conversation-confirmation"><ShieldCheck size={17} /><span>Перед выполнением операции нужно ваше подтверждение.</span></div>}
           {currentSession?.state.status === "handoff" && <div className="conversation-handoff"><Headphones size={17} /><span>Обращение передано оператору вместе с контекстом.</span><button onClick={() => void refresh()} disabled={busy || refreshing}>Проверить ответ</button></div>}
           <div className="composer">
             <div className="conversation-tools"><span>Русский · Қазақша · Türkçe</span>{voiceCall.active && <button className="text-input-toggle" onClick={() => { stopVoiceCall(); requestAnimationFrame(() => textareaRef.current?.focus()); }}>Перейти к тексту</button>}</div>
-            <form className="text-composer" onSubmit={event => { event.preventDefault(); if (!busy && !voiceCall.active) void sendTurn(draft, "text"); }}>
+            <form className="text-composer" onSubmit={event => { event.preventDefault(); if (!busy && !voiceCall.active) sendTextMessage(); }}>
               <label className="visually-hidden" htmlFor="message-input">{currentSession?.state.status === "handoff" ? "Сообщение оператору" : "Текст обращения"}</label>
-              <textarea ref={textareaRef} id="message-input" placeholder={currentSession?.state.status === "closed" ? "Разговор завершён. Начните новый." : currentSession?.state.status === "handoff" ? "Сообщение оператору…" : voiceCall.active ? "Здесь появится распознанная фраза…" : "Написать сообщение…"} value={draft} rows={1} maxLength={3000} disabled={busy || voiceCall.active || !canSendText} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!busy && !voiceCall.active) void sendTurn(draft, "text"); } }} />
+              <textarea ref={textareaRef} id="message-input" placeholder={currentSession?.state.status === "closed" ? "Разговор завершён. Начните новый." : currentSession?.state.status === "handoff" ? "Сообщение оператору…" : voiceCall.active ? "Здесь появится распознанная фраза…" : "Написать сообщение…"} value={draft} rows={1} maxLength={3000} disabled={busy || voiceCall.active || !canSendText} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!busy && !voiceCall.active) sendTextMessage(); } }} />
               <button className="send-button" type="submit" aria-label={currentSession?.state.status === "handoff" ? "Отправить сообщение оператору" : "Отправить обращение"} title="Отправить · Enter" disabled={busy || voiceCall.active || !draft.trim() || !canSendText}><ArrowRight size={20} /></button>
             </form>
             <div className="composer-footnote"><span><LockKeyhole size={12} />История сохраняется автоматически</span><span>Используйте данные кейса без реальных персональных данных</span></div>
           </div>
+          </aside>}</div>
         </section>{traceOpen && <aside className="trace-drawer" id="response-logic" aria-label="Логика ответа"><header><strong>Логика ответа</strong><button className="icon-button" onClick={() => { setTraceOpen(false); setRemindersOpen(false); traceToggleRef.current?.focus(); }} aria-label="Скрыть логику ответа"><X size={18} /></button></header><TracePanel detail={detail} catalog={bootstrap.catalog} selectedTurnId={selectedTurnId} onSelectTurn={setSelectedTurnId} isSupervisor={bootstrap.viewer.role === "supervisor"} /></aside>}{!traceOpen && remindersOpen && <ConversationContext detail={detail} catalog={bootstrap.catalog} busy={busy} onClose={() => { setRemindersOpen(false); traceToggleRef.current?.focus(); }} onTrace={() => setTraceOpen(true)} onResumeTopic={text => { stopVoiceCall(); useExample(text); }} />}</div> : view === "history" ? <HistoryView sessions={bootstrap.sessions} onOpen={id => void openSession(id)} onNew={() => void newSession()} currentId={currentSession?.id} /> : view === "catalog" ? <CatalogView catalog={bootstrap.catalog} onExample={useExample} canEdit={bootstrap.viewer.role === "supervisor"} catalogHash={bootstrap.datasetHash} onCatalogChanged={refreshBootstrap} /> : view === "supervision" && bootstrap.viewer.role === "supervisor" ? <SupervisorDashboard catalog={bootstrap.catalog} onOpen={id => void openSession(id)} /> : <OperatorsView handoffs={bootstrap.handoffs} onChanged={refreshBootstrap} onOpen={id => void openSession(id)} drafts={operatorDraftsRef.current} requests={operatorRequestsRef.current} onBusyChange={setOperatorBusy} />}
         <footer className="page-footer"><span>DIR ECHOES <span>Гибридный голосовой маршрутизатор</span></span><span>Данные кейса на {bootstrap.businessDate} <span className="footer-dot">·</span> Каталог {bootstrap.datasetHash.slice(0, 8)}</span></footer>
       </main>

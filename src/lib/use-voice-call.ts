@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-export type VoiceCallStatus = "idle" | "requesting" | "listening" | "speaking" | "processing";
+export type VoiceCallStatus = "idle" | "requesting" | "calibrating" | "settling" | "listening" | "speaking" | "processing";
 
 export interface VoiceCallOptions {
   /** Keep true through STT, routing, synthesis AND the end of audio playback. */
@@ -46,11 +46,13 @@ interface Runtime {
 }
 
 const IDLE: Snapshot = { status: "idle", micLevel: 0, elapsedMs: 0 };
-const PRE_ROLL_MS = 350;
+const PRE_ROLL_MS = 500;
 const SILENCE_MS = 950;
 const ECHO_GUARD_MS = 250;
-const ATTACK_MS = 80;
-const MIN_VOICED_MS = 140;
+const CALIBRATION_MS = 320;
+const ECHO_TAIL_MS = 80;
+const ATTACK_MS = 60;
+const MIN_VOICED_MS = 60;
 const MAX_CLIP_MS = 45_000;
 const MAX_BYTES = 3_000_000;
 const MIME_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
@@ -189,7 +191,8 @@ export function useVoiceCall(options: VoiceCallOptions) {
 
       const source = context.createMediaStreamSource(stream);
       const analyser = context.createAnalyser();
-      analyser.fftSize = 1024;
+      // Overlapping analysis windows avoid missing a short vowel between ticks.
+      analyser.fftSize = 2048;
       const gate = context.createGain();
       gate.gain.value = 0;
       const delay = context.createDelay(1);
@@ -207,6 +210,12 @@ export function useVoiceCall(options: VoiceCallOptions) {
       let busy = false;
       let observedPaused = optionsRef.current.paused;
       let cooldownUntil = performance.now() + ECHO_GUARD_MS;
+      let settleStartedAt = performance.now();
+      let calibrated = false;
+      let calibrationStartedAt: number | null = null;
+      type Frame = { at: number; duration: number; rms: number };
+      let calibrationFrames: Frame[] = [];
+      let settlingFrames: Frame[] = [];
       let candidateSince: number | null = null;
       let candidateVoicedMs = 0;
       let candidateLastAt = 0;
@@ -226,7 +235,9 @@ export function useVoiceCall(options: VoiceCallOptions) {
       const rearm = () => {
         busy = false;
         resetCandidate();
-        cooldownUntil = performance.now() + ECHO_GUARD_MS;
+        settleStartedAt = performance.now();
+        cooldownUntil = settleStartedAt + ECHO_GUARD_MS;
+        settlingFrames = [];
       };
 
       runtime.syncPaused = (paused) => {
@@ -236,19 +247,23 @@ export function useVoiceCall(options: VoiceCallOptions) {
           resetCandidate();
           discardCurrent(runtime);
           cooldownUntil = performance.now() + ECHO_GUARD_MS;
+          settlingFrames = [];
+          if (!calibrated) { calibrationFrames = []; calibrationStartedAt = null; }
           if (runtime.ready) display("processing");
         } else if (observedPaused) {
-          cooldownUntil = performance.now() + ECHO_GUARD_MS;
+          settleStartedAt = performance.now();
+          cooldownUntil = settleStartedAt + ECHO_GUARD_MS;
+          settlingFrames = [];
         }
         observedPaused = paused;
       };
 
-      const beginClip = (now: number) => {
+      const beginClip = (now: number, lastVoicedAt = now) => {
         if (!alive() || optionsRef.current.paused || busy) return;
         const recorder = new MediaRecorder(destination.stream, { mimeType: mime, audioBitsPerSecond: 64_000 });
         const clip: Clip = {
           recorder, chunks: [], bytes: 0, discarded: false, startedAt: now,
-          speechStartedAt: candidateSince ?? now, speechEndedAt: now, voicedMs: candidateVoicedMs,
+          speechStartedAt: candidateSince ?? now, speechEndedAt: lastVoicedAt, voicedMs: candidateVoicedMs,
         };
         runtime.currentClip = clip;
         runtime.clips.add(clip);
@@ -291,6 +306,25 @@ export function useVoiceCall(options: VoiceCallOptions) {
         display("speaking", 0, now - clip.speechStartedAt);
       };
 
+      const recoverBufferedSpeech = (frames: Frame[], now: number, threshold: number, after = 0) => {
+        // Audio remained in the delay while the UI was calibrating/settling.
+        // Recover a brief phrase that already ended instead of requiring the
+        // customer to keep speaking until the microphone status changes.
+        let onset: number | null = null, voiced = 0, lastVoiced = 0;
+        let candidate: { onset: number; voiced: number; lastVoiced: number } | null = null;
+        for (const frame of frames) {
+          if (frame.at < after || frame.rms < threshold) continue;
+          if (onset === null || frame.at - lastVoiced > 100) { onset = frame.at - frame.duration; voiced = 0; }
+          voiced += frame.duration;
+          lastVoiced = frame.at;
+          if (voiced >= ATTACK_MS) candidate = { onset, voiced, lastVoiced };
+        }
+        if (!candidate || now - candidate.onset >= PRE_ROLL_MS - 40) return;
+        candidateSince = candidate.onset;
+        candidateVoicedMs = candidate.voiced;
+        beginClip(now, candidate.lastVoiced);
+      };
+
       const finishClip = (clip: Clip, drain: boolean) => {
         if (!alive() || runtime.currentClip !== clip) return;
         runtime.currentClip = null;
@@ -322,23 +356,55 @@ export function useVoiceCall(options: VoiceCallOptions) {
         if (!alive() || !runtime.live) return;
         try {
           const now = performance.now();
-          const frameMs = Math.min(80, Math.max(0, now - lastTick));
+          const frameMs = Math.min(40, Math.max(0, now - lastTick));
           lastTick = now;
           runtime.syncPaused(optionsRef.current.paused);
-          if (optionsRef.current.paused || busy || now < cooldownUntil) {
+          if (optionsRef.current.paused || busy) {
             gate.gain.value = 0;
             resetCandidate();
             display("processing");
             return;
           }
+          // After real playback ends, retain local PCM during the echo guard.
+          // Muting here used to erase a quick "да/иә/evet" before VAD could see it.
           gate.gain.value = 1;
           analyser.getFloatTimeDomainData(samples);
           let sum = 0;
           for (const sample of samples) sum += sample * sample;
           const rms = Math.sqrt(sum / samples.length);
-          const openThreshold = Math.max(0.012, noiseFloor * 3);
-          const closeThreshold = Math.max(0.007, noiseFloor * 1.7);
           const level = Math.min(1, rms * 8);
+          const frame: Frame = { at: now, duration: frameMs, rms };
+          if (!calibrated) {
+            calibrationStartedAt ??= now;
+            calibrationFrames.push(frame);
+            if (now - calibrationStartedAt < CALIBRATION_MS) { display("calibrating", level); return; }
+            // The lower quartile resists a short spoken word or transient during
+            // calibration. It is an ambient estimate, not a speech classifier.
+            const levels = calibrationFrames.map(item => item.rms).sort((a, b) => a - b);
+            noiseFloor = Math.max(0.0015, levels[Math.floor(levels.length * 0.25)] ?? 0.003);
+            calibrated = true;
+            cooldownUntil = now;
+            recoverBufferedSpeech(calibrationFrames, now, Math.max(0.006, noiseFloor * 2.4));
+            calibrationFrames = [];
+            if (!runtime.currentClip) display("listening", level);
+            return;
+          }
+          const openThreshold = Math.max(0.006, noiseFloor * 2.4);
+          const closeThreshold = Math.max(0.004, noiseFloor * 1.6);
+          if (now < cooldownUntil) {
+            settlingFrames.push(frame);
+            display("settling", level);
+            return;
+          }
+          if (settlingFrames.length) {
+            settlingFrames.push(frame);
+            // Ignore the immediate output tail as an onset cue, while retaining
+            // PCM pre-roll so a real phrase beginning early keeps its first sound.
+            recoverBufferedSpeech(settlingFrames, now, openThreshold, settleStartedAt + ECHO_TAIL_MS);
+            settlingFrames = [];
+            // Recovery already counted this frame in voicedMs.
+            if (runtime.currentClip) return;
+          }
           const clip = runtime.currentClip;
           if (clip) {
             if (rms >= closeThreshold) {
@@ -357,11 +423,11 @@ export function useVoiceCall(options: VoiceCallOptions) {
             if (candidateVoicedMs >= ATTACK_MS) beginClip(now);
           } else {
             if (now - candidateLastAt > 100) resetCandidate();
-            noiseFloor = Math.min(0.012, Math.max(0.001, noiseFloor * 0.97 + rms * 0.03));
+            noiseFloor = Math.max(0.0015, noiseFloor * 0.97 + rms * 0.03);
           }
           if (!runtime.currentClip) display("listening", level);
         } catch (error) { fail(error); }
-      }, 40);
+      }, 20);
     } catch (error) { fail(error); }
   }, [publish, stop]);
 
