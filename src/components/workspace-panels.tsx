@@ -33,7 +33,7 @@ export function TracePanel({ detail, catalog, selectedTurnId, onSelectTurn, isSu
   const active = state?.activeScenarioId ? catalog.find(s => s.scenario_id === state.activeScenarioId) : null;
 
   return <aside className="trace-panel" aria-label="Решение маршрутизатора">
-    <div className="panel-heading"><span className="section-eyebrow"><GitBranch size={15} />ПОД КАПОТОМ</span><span className="trace-live">В реальном времени</span></div>
+    <div className="panel-heading"><span className="section-eyebrow"><GitBranch size={15} />МАРШРУТ И КОНТЕКСТ</span><span className="trace-live">В реальном времени</span></div>
     <div className="panel-tabs"><button className={tab === "trace" ? "active" : ""} onClick={() => setTab("trace")}>Маршрутизация</button><button className={tab === "context" ? "active" : ""} onClick={() => setTab("context")}>Контекст</button></div>
     <div className="trace-scroll">
       {tab === "context" ? <>
