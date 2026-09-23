@@ -1,4 +1,4 @@
-import { languagePhrase, stateLanguages } from "./languages";
+import { hasUnreviewedLanguages, languagePhrase, stateLanguages } from "./languages";
 import { array, mask, object, string, type DomainError } from "./domain-data";
 import type { ActionPlan } from "./domain-actions";
 import type { DialogueState, JsonObject, Scenario } from "./types";
@@ -70,6 +70,9 @@ const mixedPhrases: Record<string, { ru_tr: string; kk_tr: string }> = {
 /** Mixed TR pairs use only their actual languages; KK/TR never falls back to RU. */
 export function domainPhrase(state: Pick<DialogueState, "language" | "responseLanguages">, ru: string, kk: string, ru_kk?: string, tr?: string): string {
   const languages = stateLanguages(state);
+  // Internal factual source only: executeTurn replaces the durable fallback and
+  // gives this exact text to the translation-only composer for other languages.
+  if (hasUnreviewedLanguages(languages)) return ru || tr || kk;
   // An unreviewed future phrase must not erase facts or business conditions.
   const translated = tr ?? phrases[ru] ?? `Çevirisi bulunmayan kaynak metin: ${languages.includes("kk") && !languages.includes("ru") ? kk : ru}`;
   const mixed = mixedPhrases[ru];
@@ -97,6 +100,7 @@ const mixedQuestions: Record<string, { ru_tr: string; kk_tr: string }> = {
 
 export function turkishSlotPrompt(state: DialogueState, slot: string, ru: string, kk: string, ru_kk?: string, options = ""): string {
   const tr = (turkishSlotQuestions[slot] ?? "Eksik bilgiyi belirtir misiniz?") + options;
+  if (hasUnreviewedLanguages(stateLanguages(state))) return tr;
   const mixed = mixedQuestions[slot];
   return languagePhrase(stateLanguages(state), { ru, kk, tr, ru_kk,
     ru_tr: mixed ? mixed.ru_tr + options : `Уточните: ${tr}`,

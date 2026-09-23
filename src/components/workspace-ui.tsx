@@ -1,5 +1,6 @@
 import { AlertCircle, ArrowUpRight, AudioLines, LoaderCircle } from "lucide-react";
 import type { Handoff, Role, Scenario, Session } from "@/lib/types";
+import { normalizeLanguageCode } from "@/lib/languages";
 
 export type WorkspaceView = "conversation" | "history" | "catalog" | "operators" | "supervision";
 
@@ -113,12 +114,16 @@ export function duration(ms: number | null | undefined) {
 }
 
 export function languageLabel(language?: string, languages?: readonly string[]) {
-  const names: Record<string, string> = { ru: "Русский", kk: "Қазақша", tr: "Türkçe" };
-  if (language === "mixed") {
-    const detected = [...new Set((languages ?? []).filter(value => value in names))];
-    return (detected.length > 1 ? detected : ["ru", "kk"]).map(value => names[value]).join(" + ");
-  }
-  return language ? names[language] ?? language : "Не определён";
+  const sources = languages !== undefined ? languages : language === "mixed" ? ["ru", "kk"] : language ? [language] : [];
+  const codes = [...new Set(sources.map(normalizeLanguageCode).filter((value): value is string => value !== null))];
+  if (!codes.length) return "Не определён";
+  let names: Intl.DisplayNames | undefined;
+  try { names = new Intl.DisplayNames(["ru"], { type: "language", fallback: "code" }); } catch { /* Keep the validated code on older browsers. */ }
+  return codes.map(code => {
+    let name = code;
+    try { name = names?.of(code) ?? code; } catch { /* A code is still a truthful label. */ }
+    return name === code ? code : `${name.charAt(0).toLocaleUpperCase("ru")}${name.slice(1)} (${code})`;
+  }).join(" + ");
 }
 
 export function sessionStatus(status: string) {

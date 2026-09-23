@@ -3,6 +3,7 @@ import { z } from "zod";
 import { ApiError, type Viewer } from "./auth";
 import { query, transaction } from "./db";
 import { redact } from "./repository";
+import { listErrorEvents } from "./error-events";
 import type { Dataset, Scenario, Trace } from "./types";
 
 const fixedIds = Array.from({ length: 40 }, (_, i) => `SC${String(i + 1).padStart(2, "0")}`);
@@ -116,7 +117,7 @@ export async function saveReview(input: { turnId: string; expectedScenario: stri
 export async function getSupervision(viewer: Viewer, dataset: Dataset) {
   assertSupervisor(viewer);
   await ensureSupervision();
-  const [totals, reviewCounts, failures, recent, revisions, latency] = await Promise.all([
+  const [totals, reviewCounts, failures, recent, revisions, latency, errorEvents] = await Promise.all([
     query<{ llm_turns: string; failed_turns: string; validation_turns: string }>(`SELECT
       count(*) FILTER(WHERE status='completed' AND trace->>'source'='llm')::text AS llm_turns,
       count(*) FILTER(WHERE status='failed')::text AS failed_turns,
@@ -140,6 +141,7 @@ export async function getSupervision(viewer: Viewer, dataset: Dataset) {
       percentile_cont(0.95) WITHIN GROUP(ORDER BY (trace->'timings'->>'router')::double precision) AS router_p95
       FROM turns WHERE status='completed' AND trace->>'source' IN ('llm','slot','confirmation')
       GROUP BY trace->>'source' ORDER BY source`),
+    listErrorEvents(viewer),
   ]);
   const llmTurns = Number(totals.rows[0].llm_turns), reviewedTurns = Number(reviewCounts.rows[0].reviewed), matches = Number(reviewCounts.rows[0].matched);
   return redact({
@@ -150,6 +152,7 @@ export async function getSupervision(viewer: Viewer, dataset: Dataset) {
       reviewCoverageRate: llmTurns ? reviewedTurns / llmTurns : null,
     },
     errorCodes: failures.rows.map(row => ({ code: row.code, count: Number(row.count) })),
+    errorEvents,
     reviews: recent.rows.map(reviewResult), revisions: revisions.rows.map(revisionSummary),
     latencyBySource: latency.rows.map(row => ({ source: row.source, count: Number(row.count), p50ServerMs: row.server_p50, p95ServerMs: row.server_p95, p50RoutingMs: row.router_p50, p95RoutingMs: row.router_p95 })),
     currentCatalogHash: dataset.hash,

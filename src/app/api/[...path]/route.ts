@@ -11,6 +11,7 @@ import { streamAndCacheAudio } from "@/lib/speech-stream";
 import { getSupervision, saveReview, saveCatalogRevision, catalogPatchSchema } from "@/lib/supervision";
 import { getSessionDetail, listHandoffs, listSessions, redact, sessionRow, stats } from "@/lib/repository";
 import { updateHandoff } from "@/lib/handoffs";
+import { recordErrorEvent, type ErrorStage } from "@/lib/error-events";
 
 export const runtime="nodejs";
 export const maxDuration=60;
@@ -98,7 +99,7 @@ async function handle(request:Request,context:Context):Promise<Response>{
     if(!turn) throw new ApiError(404,"Ответ не найден.");
     const speechText=redact(turn.assistantText);
     const speechLanguage=turn.trace.responseLanguage || turn.trace.language;
-    const textHash=createHash("sha256").update(speechText).update(JSON.stringify([process.env.TTS_MODEL||"gpt-4o-mini-tts","coral",speechLanguage,turn.trace.tone||"neutral"])).digest("hex");
+    const textHash=createHash("sha256").update(speechText).update(JSON.stringify([process.env.TTS_MODEL||"gpt-4o-mini-tts","coral","conversational-v2",speechLanguage,turn.trace.tone||"neutral"])).digest("hex");
     // Ownership was checked above. Identical saved answers may reuse the same audio;
     // text, voice, model, language and tone all participate in the content key.
     const readCached=()=>query<{data:Buffer;mime:string;first_byte_ms:number}>("SELECT data,mime,first_byte_ms FROM speech_audio WHERE text_hash=$1 LIMIT 1",[textHash]);
@@ -121,12 +122,13 @@ async function handle(request:Request,context:Context):Promise<Response>{
       if(!speech.response.body) throw new ApiError(502,"Аудиосервис не вернул поток ответа.");
       source=speech.response.body;
       await query("UPDATE turns SET trace=jsonb_set(trace,'{timings}',(trace->'timings') || CASE WHEN trace->'timings' ? 'ttsFirstByte' THEN '{}'::jsonb ELSE $2::jsonb END || '{\"lastPlaybackCached\":false}'::jsonb) WHERE id=$1",[turn.id,JSON.stringify({ttsFirstByte:Math.round(speech.firstByteMs),ttsCacheHit:false})]);
-      const audioStream=streamAndCacheAudio({source:speech.response.body,release,save:async bytes=>{
+      const audioStream=streamAndCacheAudio({source:speech.response.body,release,onError:kind=>recordErrorEvent({stage:"tts",code:kind==="cache"?"storage_unavailable":"stream_failed",sessionId:data.sessionId,turnId:turn.id}),save:async bytes=>{
         await query("INSERT INTO speech_audio(turn_id,text_hash,data,mime,first_byte_ms) VALUES($1,$2,$3,$4,$5) ON CONFLICT(turn_id) DO UPDATE SET text_hash=EXCLUDED.text_hash,data=EXCLUDED.data,mime=EXCLUDED.mime,first_byte_ms=EXCLUDED.first_byte_ms",[turn.id,textHash,Buffer.from(bytes),mime,Math.round(speech.firstByteMs)]);
       }});
       streaming=true;
       return new Response(audioStream,{headers:{...noStore,"Content-Type":mime,"X-TTS-First-Byte-Ms":String(Math.round(speech.firstByteMs)),"X-Audio-Delivery":"stream"}});
-    } finally { if(!streaming) {await source?.cancel().catch(()=>{});await release();} }
+    } catch(error) { if(!request.signal.aborted) await recordErrorEvent({stage:"tts",error,sessionId:data.sessionId,turnId:turn.id}); throw error; }
+    finally { if(!streaming) {await source?.cancel().catch(()=>{});await release();} }
   }
   if(path[0]==="handoffs" && path[1] && method==="PATCH"){
     await requireViewer("supervisor");
@@ -136,5 +138,16 @@ async function handle(request:Request,context:Context):Promise<Response>{
   }
   throw new ApiError(404,"Маршрут не найден.");
 }
-async function guarded(request:Request,context:Context){try{return await handle(request,context);}catch(error){return errorResponse(error);}}
+async function guarded(request:Request,context:Context){
+  try{return await handle(request,context);}catch(error){
+    const {path}=await context.params;
+    // Turn and TTS workers record failures with their authorized record IDs.
+    // Never store request bodies, credentials, raw audio or provider error text.
+    if(path[0]!=="auth" && path[0]!=="speech" && path[2]!=="turn" && !request.signal.aborted) {
+      const stage:ErrorStage=path[0]==="transcribe"?"stt":path[0]==="handoffs"?"handoff":path[0]==="catalog"?"catalog":"api";
+      await recordErrorEvent({stage,error});
+    }
+    return errorResponse(error);
+  }
+}
 export {guarded as GET,guarded as POST,guarded as PATCH,guarded as DELETE};

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowRight, Check, ClipboardCheck, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
 import type { Scenario, Turn } from "@/lib/types";
+import type { ErrorEvent } from "@/lib/error-events";
 import { api, ApiError, dateTime, duration, EmptyState, ErrorNotice, readableError, scenarioDisplayName, Spinner } from "./workspace-ui";
 import styles from "./supervisor-tools.module.css";
 
@@ -11,14 +12,16 @@ type Revision = { id: string; hash: string; parentHash: string; scenarioId: stri
 type Supervision = {
   stats: { llmTurns: number; storedFailedTurns: number; validationFailedTurns: number; reviewedTurns: number; matchedPrimary: number; correctedPrimary: number; primaryAgreementRate: number | null; reviewCoverageRate: number | null };
   errorCodes: { code: string; count: number }[]; reviews: Review[]; revisions: Revision[]; currentCatalogHash: string; methodology: string;
+  errorEvents: ErrorEvent[];
   latencyBySource: { source: "llm" | "slot" | "confirmation"; count: number; p50ServerMs: number | null; p95ServerMs: number | null; p50RoutingMs: number | null; p95RoutingMs: number | null }[];
 };
 const systemIds = ["SYS_OUT_OF_SCOPE", "SYS_UNCLEAR", "SYS_GOODBYE"];
 const fieldNames: Record<string, string> = { name: "название", description: "описание", examples: "примеры", not_this_if: "исключения" };
 const percentage = (value: number | null) => value == null ? "—" : `${(value * 100).toLocaleString("ru-RU", { maximumFractionDigits: 1 })}%`;
 const scenarioName = (catalog: Scenario[], id: string | null) => id ? scenarioDisplayName(id, catalog.find(s => s.scenario_id === id)?.name) : "Не определён";
+const errorStageNames: Record<ErrorEvent["stage"], string> = { router: "Выбор сценария", executor: "Исполнение действия", reply: "Формулировка ответа", stt: "Распознавание речи", tts: "Синтез речи", api: "Запрос приложения", handoff: "Работа оператора", catalog: "Изменение каталога" };
 
-export function SupervisorDashboard({ catalog, onOpen }: { catalog: Scenario[]; onOpen: (sessionId: string) => void }) {
+export function SupervisorDashboard({ catalog, onOpen }: { catalog: Scenario[]; onOpen: (sessionId: string, turnId?: string) => void }) {
   const [data, setData] = useState<Supervision | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -46,6 +49,18 @@ export function SupervisorDashboard({ catalog, onOpen }: { catalog: Scenario[]; 
         <section className={styles.section}><h3>Ошибки исполнения</h3><dl className="slot-list"><div><dt>Реплики со статусом «Ошибка»</dt><dd>{data.stats.storedFailedTurns}</dd></div><div><dt>Реплики с отказом бизнес-действия</dt><dd>{data.stats.validationFailedTurns}</dd></div></dl><p className={styles.hint}>Отказ может означать корректную проверку данных, например неподходящий полис. Это не оценка ошибки модели.</p>{data.errorCodes.length ? <ul className={styles.errorList}>{data.errorCodes.map(item => <li key={item.code}><code>{item.code}</code><strong>{item.count}</strong></li>)}</ul> : <p className={styles.hint}>Сохранённых отказов бизнес-действий нет.</p>}</section>
         <section className={styles.section}><h3>Версии каталога</h3><p className={styles.hint}>Текущая версия: <code>{data.currentCatalogHash.slice(0, 12)}</code></p>{data.revisions.length ? <ul className={styles.revisionList}>{data.revisions.map(revision => <li key={revision.id}><div><strong>{scenarioName(catalog, revision.scenarioId)}</strong><time>{dateTime(revision.createdAt)}</time></div><p>{revision.fields.map(field => fieldNames[field] ?? field).join(", ")} · <code>{revision.hash.slice(0, 12)}</code></p></li>)}</ul> : <p className={styles.hint}>Каталог ещё не редактировали. Используется исходная версия.</p>}</section>
       </div>
+      <section className={styles.section} aria-labelledby="error-journal-title">
+        <div className={styles.sectionHeading}><h3 id="error-journal-title">Журнал технических ошибок</h3><span className={styles.hint}>Последние 50 событий</span></div>
+        <p className={styles.hint}>События сохраняются отдельно от реплик и остаются после успешной повторной попытки. Сообщения содержат только безопасную категорию сбоя; тексты клиентов и ответы провайдера сюда не записываются.</p>
+        {(data.errorEvents ?? []).length ? <ul className={styles.revisionList}>{data.errorEvents.map(event => <li key={event.id}>
+          <div><strong>{errorStageNames[event.stage] ?? "Запрос приложения"}</strong><time dateTime={event.createdAt}>{dateTime(event.createdAt)}</time></div>
+          <p><code>{event.code}</code>{event.httpStatus != null && <> · HTTP {event.httpStatus}</>} — {event.message}</p>
+          <div className={styles.sectionHeading}>
+            {event.sessionAvailable && event.sessionId ? <button className="button button-secondary button-small" onClick={() => onOpen(event.sessionId!)}>Открыть разговор<ArrowRight size={14} /></button> : <span className={styles.hint}>Без доступного разговора</span>}
+            {event.turnAvailable && event.turnId && event.sessionId ? <button className="button button-ghost button-small" onClick={() => onOpen(event.sessionId!, event.turnId!)}>Открыть реплику<ArrowRight size={14} /></button> : event.turnId ? <span className={styles.hint}>Попытка не завершена или заменена при повторе</span> : null}
+          </div>
+        </li>)}</ul> : <p className={styles.hint}>В журнале пока нет событий. Это не подтверждает отсутствие ошибок до его включения.</p>}
+      </section>
       <section className={styles.section}><div className={styles.sectionHeading}><h3>Последние ручные оценки</h3><span className={styles.hint}>До 50 записей</span></div>{!data.reviews.length ? <div className={styles.noReviews}><ClipboardCheck size={24} /><p>Откройте разговор, выберите реплику в панели маршрутизации и укажите ожидаемый основной сценарий.</p></div> : <div className={styles.reviews}>{data.reviews.map(review => <article key={review.id} className={styles.review}><div className={styles.sectionHeading}><span className={review.matchesPrimary ? styles.match : styles.correction}>{review.matchesPrimary ? "Маршрут подтверждён" : "Маршрут исправлен"}</span><time>{dateTime(review.createdAt)}</time></div><p className={styles.utterance}>{review.userText}</p><dl className="slot-list"><div><dt>Выбран маршрутизатором</dt><dd>{scenarioName(catalog, review.actualScenario)}</dd></div><div><dt>Ожидаемый основной маршрут</dt><dd>{scenarioName(catalog, review.expectedScenario)}</dd></div></dl>{review.note && <p className={styles.reviewNote}>{review.note}</p>}{review.sessionId && <button className="button button-secondary button-small" onClick={() => onOpen(review.sessionId!)}>Открыть разговор<ArrowRight size={14} /></button>}</article>)}</div>}</section>
     </div>}
   </section>;

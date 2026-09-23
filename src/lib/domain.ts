@@ -3,7 +3,7 @@ import type { ActionResult, DialogueState, ExecuteInput, ExecuteOutput, Json, Js
 import { appHelpFailed, MUTATING_ACTIONS, planActions, statusLabel, type ActionPlan } from "./domain-actions";
 import { array, DomainError, localized, lookupKnowledge, mask, normalizeSlot, object, policyStatus, present, productForScenario, regionFromPlate, string } from "./domain-data";
 import { effectiveSlots } from "./routing-slots";
-import { languageFromList, spokenLanguages, stateLanguages } from "./languages";
+import { hasUnreviewedLanguages, languageFromList, spokenLanguages, stateLanguages } from "./languages";
 import { domainErrorText, domainPhrase, turkishConfirmation, turkishFallback, turkishScenarioName, turkishSlotPrompt } from "./domain-language";
 
 export function initialState(): DialogueState {
@@ -176,7 +176,25 @@ function complete(state: DialogueState, scenario: Scenario): void {
   state.activeScenarioId = null; state.lastQuestionSlot = null; state.pendingConfirmation = null; state.lookupFailures = 0;
 }
 
+/** A factual translation source is separate from the durable, explicit fallback.
+ * The composer may translate it, but can never authorize an operation. */
 export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
+  const output = await executeDomainTurn(input);
+  if (hasUnreviewedLanguages(stateLanguages(output.state))) {
+    output.facts.translation_source_text = output.reply;
+    const safetyScenario = input.decision.scenarios.find(candidate => candidate.confidence >= 0.75 && ["SC11", "SC38"].includes(candidate.scenarioId))?.scenarioId;
+    const safety = safetyScenario === "SC11" ? "If anyone is injured, call 112 immediately. " : safetyScenario === "SC38" ? "Never share SMS codes, CVV or PIN. " : "";
+    output.reply = output.facts.language_consent_blocked === true
+      ? "[LANGUAGE_TRANSLATION_REQUIRED] No operation was confirmed. To review an operation, please choose Russian, Kazakh or Turkish, or explicitly ask for a human operator. Your pending request is preserved."
+      : output.handoff
+        ? "[LANGUAGE_TRANSLATION_REQUIRED] Your request and conversation context are saved in the operator queue. An operator can continue here; a live phone connection has not been established."
+        : "[LANGUAGE_TRANSLATION_REQUIRED] I could not provide this step in your language. Please choose Russian, Kazakh or Turkish, or ask for a human operator.";
+    output.reply = safety + output.reply;
+  }
+  return output;
+}
+
+async function executeDomainTurn(input: ExecuteInput): Promise<ExecuteOutput> {
   const state = structuredClone(input.state), { dataset, decision, store } = input;
   const slotDefinitions = effectiveSlots(dataset);
   const replyLanguage = decision.responseLanguage ?? decision.language;
@@ -184,9 +202,23 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
   state.language = languageFromList(state.responseLanguages);
   const output: ExecuteOutput = { state, actions: [], reply: "", facts: {}, warnings: [] };
   const text = (ru: string, kk: string, mixed?: string, tr?: string) => domainPhrase(state, ru, kk, mixed, tr);
+  const requiresReviewedConsent = hasUnreviewedLanguages(stateLanguages(state)) || hasUnreviewedLanguages(spokenLanguages(decision.language, decision.inputLanguages));
+  const languageConsent = (safety = ""): ExecuteOutput => {
+    output.actions = [];
+    // Never send the unreviewed operation summary to the translation composer.
+    output.facts = { language_consent_blocked: true };
+    output.reply = safety + text(
+      "Операция не подтверждена. Для проверки и подтверждения выберите русский, казахский или турецкий язык либо прямо попросите оператора. Сохранённый запрос остаётся в разговоре.",
+      "Операция расталған жоқ. Тексеру және растау үшін орыс, қазақ немесе түрік тілін таңдаңыз немесе операторды тікелей сұраңыз. Сақталған сұраныс әңгімеде қалады.",
+      undefined,
+      "İşlem onaylanmadı. İnceleme ve onay için Rusça, Kazakça veya Türkçe seçin ya da açıkça bir operatör isteyin. Kaydedilen talep görüşmede korunur.",
+    );
+    return output;
+  };
   const handoff = (queue: string, reason: string, authorized = false): ExecuteOutput => {
     const selectedQueue = dataset.queues.includes(queue) ? queue : "operator_general";
     if (!authorized) {
+      if (requiresReviewedConsent) return languageConsent();
       if (state.activeScenarioId && state.activeScenarioId !== "SC37") {
         state.slotsByScenario[state.activeScenarioId] = structuredClone(state.slots);
         if (!state.suspendedScenarioIds.includes(state.activeScenarioId)) state.suspendedScenarioIds.push(state.activeScenarioId);
@@ -210,7 +242,32 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
   const candidates = decision.scenarios.filter(c => dataset.scenarios.some(s => s.scenario_id === c.scenarioId) || dataset.systemIntents.some(s => s.id === c.scenarioId));
   const ranked = [...candidates].sort((a, b) => Number(dataset.scenarios.find(s => s.scenario_id === b.scenarioId)?.priority === "urgent") - Number(dataset.scenarios.find(s => s.scenario_id === a.scenarioId)?.priority === "urgent"));
   const primary = ranked[0];
-  const pendingHandoff = state.pendingConfirmation?.slots.__handoff === true ? state.pendingConfirmation : null;
+  const directOperatorRequest = primary?.scenarioId === "SC37" && primary.confidence >= 0.75 && !decision.clarification && !decision.alternatives.length
+    && (!requiresReviewedConsent || (decision.confirmation === "none" && !decision.isContinuation));
+  const urgentGuidance = (scenarioId?: string) => scenarioId === "SC11"
+    ? text("Если есть пострадавшие, сразу звоните сто двенадцать. ", "Зардап шеккендер болса, бірден жүз он екіге қоңырау шалыңыз. ")
+    : scenarioId === "SC38" ? text("Никому не сообщайте SMS-коды, CVV и PIN. ", "Ешкімге SMS кодын, CVV және PIN айтпаңыз. ") : "";
+  // Social contact is not an unsuccessful business request and cannot authorize,
+  // cancel or replace a pending operation. The router supplies this semantic label.
+  if (decision.utteranceKind === "greeting" && primary?.scenarioId === "SYS_UNCLEAR" && !Object.keys(decision.slots).length && decision.confirmation === "none") {
+    state.unclearCount = 0;
+    output.facts = { social_contact: true };
+    output.reply = text("Здравствуйте, я на связи. Расскажите, чем помочь по страховке.", "Сәлеметсіз бе, мен байланыстамын. Сақтандыру бойынша қалай көмектесе аламын?", "Здравствуйте, мен байланыстамын. Сақтандыру бойынша чем помочь?", "Merhaba, buradayım. Sigortayla ilgili nasıl yardımcı olabilirim?");
+    return output;
+  }
+  let pendingHandoff = state.pendingConfirmation?.slots.__handoff === true ? state.pendingConfirmation : null;
+  const developsRequest = decision.utteranceKind === "request" || (!decision.utteranceKind && !decision.isContinuation && primary?.scenarioId !== "SC37");
+  if (pendingHandoff && developsRequest && decision.confirmation === "none" && !directOperatorRequest) {
+    // A proposal to transfer is optional: a meaningful new question resumes AI
+    // assistance even before it is specific enough to select a catalog scenario.
+    state.pendingConfirmation = null; state.unclearCount = 0;
+    state.activeScenarioId = null; state.lastQuestionSlot = null; state.slots = {};
+    delete state.slotsByScenario.SC37;
+    pendingHandoff = null;
+  }
+  // An unfamiliar affirmation or rejection must not consume, replace or cancel
+  // an operation reviewed earlier. An explicit operator request is a separate decision.
+  if (state.pendingConfirmation && requiresReviewedConsent && !directOperatorRequest) return languageConsent(urgentGuidance(primary?.scenarioId));
   if (pendingHandoff && (!primary || primary.scenarioId === "SC37" || primary.scenarioId === "SYS_UNCLEAR")) {
     if (decision.confirmation === "reject") {
       state.pendingConfirmation = null; state.unclearCount = 0;
@@ -236,7 +293,7 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
   }
   // Only an unambiguous direct request is already the client's decision.
   // Lower-confidence routing must reach the clarification branch below.
-  if (primary?.scenarioId === "SC37" && primary.confidence >= 0.75 && !decision.clarification && !decision.alternatives.length) return handoff(pendingHandoff ? string(pendingHandoff.slots.__handoff_queue) : "operator_general", pendingHandoff ? string(pendingHandoff.slots.__handoff_reason) : "Client requested a human operator", true);
+  if (directOperatorRequest) return handoff(pendingHandoff ? string(pendingHandoff.slots.__handoff_queue) : "operator_general", pendingHandoff ? string(pendingHandoff.slots.__handoff_reason) : "Client requested a human operator", true);
   if (primary?.scenarioId === "SYS_GOODBYE" && primary.confidence >= 0.75) { state.status = "closed"; state.pendingConfirmation = null; output.reply = text("Спасибо за обращение. Всего доброго!", "Хабарласқаныңызға рақмет. Сау болыңыз!"); return output; }
   if (primary?.scenarioId === "SYS_OUT_OF_SCOPE" && primary.confidence >= 0.75) { output.reply = text("Я помогаю с услугами страхования Saqta: авто, ДМС, поездки, имущество и несчастные случаи. Какой вопрос по этим услугам вас интересует?", "Мен Saqta сақтандыруы бойынша көмектесемін: көлік, ДМС, саяхат, мүлік және жазатайым оқиғалар. Осы қызметтер бойынша қандай сұрағыңыз бар?"); return output; }
   const continued = decision.isContinuation && !!state.activeScenarioId && (!primary || primary.scenarioId === state.activeScenarioId || primary.scenarioId === "SYS_UNCLEAR");
@@ -321,7 +378,7 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
     }
     state.lastQuestionSlot = null;
     const pending = state.pendingConfirmation;
-    const confirmed = !!pending && pending.scenarioId === targetId && decision.confirmation === "confirm" && !changedWhilePending;
+    const confirmed = !requiresReviewedConsent && !!pending && pending.scenarioId === targetId && decision.confirmation === "confirm" && !changedWhilePending;
     if (confirmed) {
       const saved = await store.get("operations", pending.id);
       if (saved) {
@@ -337,6 +394,7 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
     if (scenario.scenario_id === "SC34" && appHelpFailed(input.text)) state.slots.__app_help_failed = true;
     const plan = await planActions({ dataset, store, scenario, slots: state.slots, clientId: state.clientId, sessionId: input.sessionId, requestId: input.requestId, text: input.text, preview: !confirmed });
     const needsConfirmation = plan.writes.length > 0 || Boolean(plan.handoff);
+    if (needsConfirmation && requiresReviewedConsent) return languageConsent(urgentGuidance(targetId));
     const signature = reviewSignature(plan);
     const changedAtExecution = confirmed && pending.slots.__review !== signature;
     output.facts = { ...plan.facts, slots: safeSlots(state.slots), queued_scenarios: state.pendingScenarioIds };

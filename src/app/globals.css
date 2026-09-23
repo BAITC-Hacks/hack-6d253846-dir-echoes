@@ -1216,6 +1216,32 @@ html[data-theme="dark"] .app-shell.immersive-voice {
 .app-shell.immersive-voice .voice-chat-panel .composer-footnote > span:first-child { display: none; }
 .app-shell.immersive-voice .voice-chat-panel .composer > .tiny { color: var(--voice-muted); }
 
+/* Explicit speaker identity, while keeping the transcript overlay transparent. */
+.conversation-thread { --speaker-user: #315f9d; --speaker-ai: #227451; --speaker-operator: #9a5c20; --speaker-system: #64717d; }
+html[data-theme="dark"] .conversation-thread { --speaker-user: #a6c6ff; --speaker-ai: #86d8b0; --speaker-operator: #f0c285; --speaker-system: #b4bec8; }
+.conversation-thread .transcript-message { --speaker-accent: var(--speaker-ai); display: flex; align-items: flex-start; gap: 9px; padding: 3px 0 3px 10px; border-inline-start: 2px solid var(--speaker-accent); background: transparent; border-radius: 0; }
+.conversation-thread .transcript-message[data-speaker="user"] { --speaker-accent: var(--speaker-user); }
+.conversation-thread .transcript-message[data-speaker="operator"] { --speaker-accent: var(--speaker-operator); }
+.conversation-thread .transcript-message[data-speaker="system"] { --speaker-accent: var(--speaker-system); }
+.conversation-thread .transcript-avatar { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 22px; width: 22px; height: 22px; margin-top: 1px; border: 1px solid currentColor; border-radius: 50%; color: var(--speaker-accent); background: transparent; }
+.conversation-thread .transcript-message-content { flex: 1; min-width: 0; }
+.conversation-thread .message-meta .transcript-speaker { color: var(--speaker-accent); font-size: 12px; font-weight: 700; letter-spacing: .01em; }
+.conversation-thread .message-meta time { margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; }
+.conversation-thread .transcript-human-label { font-size: 11px; }
+.app-shell.immersive-voice .voice-chat-panel .conversation-thread .turn-group { margin-bottom: 24px; }
+.app-shell.immersive-voice .voice-chat-panel .conversation-thread .transcript-message { gap: 9px; }
+.app-shell.immersive-voice .voice-chat-panel .conversation-thread .message-user { width: calc(100% - 18px); max-width: calc(100% - 18px); margin: 0 0 16px 18px; }
+.app-shell.immersive-voice .voice-chat-panel .conversation-thread .message-meta { min-height: 22px; gap: 7px; margin-bottom: 4px; flex-wrap: wrap; }
+.app-shell.immersive-voice .voice-chat-panel .conversation-thread .message-meta .transcript-speaker { color: var(--speaker-accent); font-size: 12px; font-weight: 700; }
+.app-shell.immersive-voice .voice-chat-panel .conversation-thread .message-bubble { padding: 0; background: transparent; border: 0; }
+.app-shell.immersive-voice .voice-chat-panel .conversation-thread .message-actions { gap: 7px 11px; margin-top: 6px; }
+.app-shell.immersive-voice .voice-chat-panel .conversation-thread .message-selected { border-inline-start-color: var(--speaker-accent); }
+@media (max-width: 600px) {
+  .app-shell.immersive-voice .voice-chat-panel .conversation-thread .message-user { width: calc(100% - 10px); max-width: calc(100% - 10px); margin-left: 10px; }
+  .app-shell.immersive-voice .voice-chat-panel .conversation-thread .transcript-message { gap: 7px; padding-inline-start: 8px; }
+  .app-shell.immersive-voice .voice-chat-panel .conversation-thread .message-actions > button { min-height: 32px; }
+}
+
 /* Optional context and trace float above the transcript without moving the stage. */
 .app-shell.immersive-voice .immersive-layout > :is(.context-rail, .trace-drawer) {
   position: absolute;

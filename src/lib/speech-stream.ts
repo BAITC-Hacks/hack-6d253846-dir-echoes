@@ -3,6 +3,7 @@ export function streamAndCacheAudio(input: {
   source: ReadableStream<Uint8Array>;
   save: (bytes: Uint8Array) => Promise<void>;
   release: () => Promise<void>;
+  onError?: (kind: "stream" | "cache") => Promise<unknown>;
   maximumBytes?: number;
 }): ReadableStream<Uint8Array> {
   const reader=input.source.getReader();
@@ -24,7 +25,7 @@ export function streamAndCacheAudio(input: {
           const bytes=new Uint8Array(size);
           let offset=0;
           for(const chunk of chunks) {bytes.set(chunk,offset);offset+=chunk.byteLength;}
-          await input.save(bytes).catch(()=>console.error("Complete audio could not be cached"));
+          await input.save(bytes).catch(async()=>{ console.error("Complete audio could not be cached"); await input.onError?.("cache").catch(()=>{}); });
           await release();
           if(cancelled) return;
           controller.close();
@@ -35,6 +36,7 @@ export function streamAndCacheAudio(input: {
         chunks.push(next.value);
         controller.enqueue(next.value);
       } catch(error) {
+        if(!cancelled) await input.onError?.("stream").catch(()=>{});
         await reader.cancel(error).catch(()=>{});
         await release();
         if(!cancelled) controller.error(error);

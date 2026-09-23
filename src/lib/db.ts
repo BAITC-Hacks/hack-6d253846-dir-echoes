@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS review_annotations (id text PRIMARY KEY, turn_id text
 CREATE TABLE IF NOT EXISTS speech_audio (turn_id text PRIMARY KEY REFERENCES turns(id), text_hash text NOT NULL, data bytea NOT NULL, mime text NOT NULL, first_byte_ms integer NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS speech_audio_content ON speech_audio(text_hash);
 CREATE TABLE IF NOT EXISTS speech_content_leases (text_hash text PRIMARY KEY, token text NOT NULL, expires_at timestamptz NOT NULL);
+CREATE TABLE IF NOT EXISTS error_events (
+  id text PRIMARY KEY, session_id text, turn_id text,
+  stage text NOT NULL, code text NOT NULL, safe_message text NOT NULL,
+  http_status integer CHECK(http_status BETWEEN 400 AND 599), created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS error_events_latest ON error_events(created_at DESC,id DESC);
 `;
 
 async function connect(): Promise<Connection> {

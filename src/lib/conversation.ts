@@ -7,6 +7,7 @@ import { executeTurn } from "./domain";
 import { languagePhrase, stateLanguages } from "./languages";
 import { entityStore, getSessionDetail, sessionRow, putHandoff, redact } from "./repository";
 import type { ChatEntry, ExecuteOutput, Trace } from "./types";
+import { recordErrorEvent, type ErrorStage } from "./error-events";
 
 export async function processTurn(sessionId: string, viewer: Viewer, input: {text:string;requestId:string;mode:"text"|"voice";sttMs?:number}) {
   const started=performance.now();
@@ -22,7 +23,7 @@ export async function processTurn(sessionId: string, viewer: Viewer, input: {tex
     if(duplicate.rows[0]?.status==="completed") return true;
     if(row.busy_until && new Date(row.busy_until).getTime()>Date.now()) throw new ApiError(409,"Предыдущая реплика ещё обрабатывается.");
     if(row.state.status==="closed") throw new ApiError(409,"Разговор завершён. Начните новый разговор.");
-    if(prior.turns.length>=60) throw new ApiError(409,"В разговоре достигнут лимит реплик. Начните новый разговор.");
+    if(row.state.status!=="handoff" && prior.turns.length>=60) throw new ApiError(409,"В разговоре достигнут лимит реплик. Начните новый разговор.");
     await sql.query("DELETE FROM turns WHERE session_id=$1 AND request_id=$2 AND status IN ('processing','failed')",[sessionId,input.requestId]);
     await sql.query("INSERT INTO turns(id,session_id,request_id,user_text,mode) VALUES($1,$2,$3,$4,$5)",[turnId,sessionId,input.requestId,input.text,input.mode]);
     await sql.query("UPDATE sessions SET busy_until=now()+interval '100 seconds',busy_token=$2 WHERE id=$1",[sessionId,turnId]);
@@ -30,16 +31,17 @@ export async function processTurn(sessionId: string, viewer: Viewer, input: {tex
   });
   if(replay) return getSessionDetail(sessionId,viewer);
   let committed=false;
+  let stage:ErrorStage="router";
   try {
     prior=await getSessionDetail(sessionId,viewer);
     const history:ChatEntry[]=prior.turns.slice(-10).flatMap(turn=>[{role:"user" as const,content:turn.userText},{role:"assistant" as const,content:turn.assistantText}]);
     if(prior.session.state.status==="handoff") {
       const responseLanguages=stateLanguages(prior.session.state);
-      const trace:Trace={scenarios:[],alternatives:[],reason:languagePhrase(responseLanguages,{ru:"Сообщение клиента сохранено в обращении для оператора",kk:"Клиент хабарламасы оператор өтінішінде сақталды",tr:"Müşterinin mesajı operatörün talebine kaydedildi.",ru_tr:"Сообщение клиента operatörün talebine kaydedildi.",kk_tr:"Клиент хабарламасы operatörün talebine kaydedildi."}),language:prior.session.state.language,responseLanguage:prior.session.state.language,inputLanguages:responseLanguages,responseLanguages,slots:{},actions:[],timings:{stt:input.sttMs??null,router:0,executor:0,response:0,serverTotal:Math.round(performance.now()-started)},catalogHash:dataset.hash,model:"operator_queue",usage:{inputTokens:0,outputTokens:0,estimatedUsd:0},source:"operator",warnings:[]};
+      const trace:Trace={scenarios:[],alternatives:[],reason:languagePhrase(responseLanguages,{ru:"Сообщение клиента сохранено в обращении для оператора",kk:"Клиент хабарламасы оператор өтінішінде сақталды",tr:"Müşterinin mesajı operatörün talebine kaydedildi.",ru_tr:"Сообщение клиента operatörün talebine kaydedildi.",kk_tr:"Клиент хабарламасы operatörün talebine kaydedildi.",other:"Client message saved in the operator request."}),language:prior.session.state.language,responseLanguage:prior.session.state.language,inputLanguages:responseLanguages,responseLanguages,slots:{},actions:[],timings:{stt:input.sttMs??null,router:0,executor:0,response:0,serverTotal:Math.round(performance.now()-started)},catalogHash:dataset.hash,model:"operator_queue",usage:{inputTokens:0,outputTokens:0,estimatedUsd:0},source:"operator",warnings:[]};
       await transaction(async sql=>{
         const current=await sessionRow(sessionId,viewer,sql,true);
         if(current.busy_token!==turnId || current.version!==prior.session.version || current.state.status!=="handoff") throw new ApiError(409,"Состояние обращения изменилось. Обновите историю перед следующей репликой.");
-        const acknowledgement=languagePhrase(stateLanguages(current.state),{ru:"Сообщение сохранено в обращении. Оператор увидит его в истории.",kk:"Хабарлама өтініште сақталды. Оператор оны сөйлесу тарихынан көреді.",tr:"Mesajınız talebe kaydedildi. Operatör konuşma geçmişinde görebilir.",ru_kk:"Сообщение сохранено в обращении. Оператор оны сөйлесу тарихынан көреді.",ru_tr:"Сообщение сохранено в обращении. Operatör konuşma geçmişinde görebilir.",kk_tr:"Хабарлама өтініште сақталды. Operatör konuşma geçmişinde görebilir."});
+        const acknowledgement=languagePhrase(stateLanguages(current.state),{ru:"Сообщение сохранено в обращении. Оператор увидит его в истории.",kk:"Хабарлама өтініште сақталды. Оператор оны сөйлесу тарихынан көреді.",tr:"Mesajınız talebe kaydedildi. Operatör konuşma geçmişinde görebilir.",ru_kk:"Сообщение сохранено в обращении. Оператор оны сөйлесу тарихынан көреді.",ru_tr:"Сообщение сохранено в обращении. Operatör konuşma geçmişinde görebilir.",kk_tr:"Хабарлама өтініште сақталды. Operatör konuşma geçmişinde görebilir.",other:"[LANGUAGE_TRANSLATION_REQUIRED] Your message is saved in the request. The operator can read it in the conversation history."});
         await sql.query("UPDATE turns SET assistant_text=$2,trace=$3::jsonb,status='completed' WHERE id=$1",[turnId,acknowledgement,JSON.stringify(trace)]);
         await sql.query("UPDATE sessions SET version=version+1,updated_at=now() WHERE id=$1",[sessionId]);
         await sql.query("UPDATE handoffs SET summary=right(summary || $2,6000),updated_at=now() WHERE session_id=$1 AND status<>'closed'",[sessionId,redact(`\nКлиент: ${input.text}`)]);
@@ -47,6 +49,7 @@ export async function processTurn(sessionId: string, viewer: Viewer, input: {tex
       committed=true; return getSessionDetail(sessionId,viewer);
     }
     const routed=await routeUtterance({dataset,state:prior.session.state,history,text:input.text});
+    stage="executor";
     const executionStart=performance.now();
     let execution:ExecuteOutput;
     let trace:Trace;
@@ -74,12 +77,13 @@ export async function processTurn(sessionId: string, viewer: Viewer, input: {tex
         reply=composed.text;
         trace!.timings.response=composed.elapsedMs;
         trace!.usage.inputTokens+=composed.inputTokens; trace!.usage.outputTokens+=composed.outputTokens; trace!.usage.estimatedUsd+=composed.estimatedUsd;
-      } catch { trace!.warnings.push("Формулировка ответа не улучшена из-за ошибки API; показан сохранённый ответ исполнителя."); }
+      } catch(error) { await recordErrorEvent({stage:"reply",error,sessionId,turnId}); trace!.warnings.push("Формулировка ответа не улучшена из-за ошибки API; показан сохранённый ответ исполнителя."); }
     }
     trace!.timings.serverTotal=Math.round(performance.now()-started);
     await query("UPDATE turns SET assistant_text=$2,trace=$3::jsonb,status='completed' WHERE id=$1",[turnId,reply,JSON.stringify(trace!)]);
     return await getSessionDetail(sessionId,viewer);
   } catch(error) {
+    await recordErrorEvent({stage,error,sessionId,turnId});
     if(committed) { await query("UPDATE turns SET status='completed' WHERE id=$1 AND status='finalizing'",[turnId]); return await getSessionDetail(sessionId,viewer); }
     await query("UPDATE turns SET status='failed' WHERE id=$1",[turnId]);
     throw error;

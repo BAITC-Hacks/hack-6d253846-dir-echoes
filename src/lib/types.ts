@@ -1,7 +1,9 @@
 export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 export type JsonObject = { [key: string]: Json };
-export type SpokenLanguage = "ru" | "kk" | "tr";
-export type Language = SpokenLanguage | "mixed";
+export type ReviewedLanguage = "ru" | "kk" | "tr";
+/** Normalized BCP 47 base code; external values must pass normalizeLanguageCode. */
+export type SpokenLanguage = string;
+export type Language = ReviewedLanguage | "mixed" | "other";
 export type ReplyTone = "neutral" | "calm" | "reassuring";
 export type Role = "participant" | "supervisor";
 export type Scenario = {
@@ -25,6 +27,8 @@ export type Dataset = {
 export type ScenarioChoice = { scenarioId: string; confidence: number; reason: string };
 export type RoutingDecision = {
   scenarios: ScenarioChoice[]; alternatives: ScenarioChoice[];
+  /** Social contact is distinct from a failed attempt to understand a business request. */
+  utteranceKind?: "greeting" | "request" | "answer";
   language: Language; slots: JsonObject; isContinuation: boolean;
   responseLanguage?: Language; tone?: ReplyTone;
   inputLanguages?: SpokenLanguage[]; responseLanguages?: SpokenLanguage[];
