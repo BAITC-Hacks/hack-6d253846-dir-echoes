@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { query, transaction } from "./db";
 import type { Dataset, JsonObject } from "./types";
+import { readCatalogRevision } from "./supervision";
 
 export async function loadDatasetFromPath(directory: string): Promise<Dataset> {
   const names = ["scenarios", "slots", "actions", "knowledge_base", "mock_backend"];
@@ -45,8 +46,14 @@ export async function importDataset(directory: string) {
 }
 let cachedDataset: Dataset | undefined;
 export async function getDataset(): Promise<Dataset> {
-  if (cachedDataset) return cachedDataset;
-  const result = await query<{ data: Dataset }>("SELECT data FROM dataset_versions WHERE id='current'");
-  if (!result.rows[0]) throw new Error("DATASET_NOT_IMPORTED: run the documented dataset import.");
-  cachedDataset = result.rows[0].data; return cachedDataset;
+  if (!cachedDataset) {
+    const result = await query<{ data: Dataset }>("SELECT data FROM dataset_versions WHERE id='current'");
+    if (!result.rows[0]) throw new Error("DATASET_NOT_IMPORTED: run the documented dataset import.");
+    cachedDataset = result.rows[0].data;
+  }
+  // Read the current revision across instances; editing never mutates the organizer seed.
+  const revision=await readCatalogRevision();
+  return revision && revision.baseHash===cachedDataset.hash
+    ? {...cachedDataset,hash:revision.hash,scenarios:revision.scenarios}
+    : cachedDataset;
 }

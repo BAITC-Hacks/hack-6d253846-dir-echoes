@@ -52,6 +52,6 @@ export async function stats(viewer: Viewer) {
     (SELECT count(*) FROM sessions WHERE $1='supervisor' OR owner_id=$2) AS sessions,
     (SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE t.status='completed' AND ($1='supervisor' OR s.owner_id=$2)) AS turns,
     (SELECT count(*) FROM handoffs h JOIN sessions s ON s.id=h.session_id WHERE h.status<>'closed' AND ($1='supervisor' OR s.owner_id=$2)) AS handoffs,
-    (SELECT percentile_cont(0.5) WITHIN GROUP(ORDER BY (t.trace->'timings'->>'router')::double precision) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE t.status='completed' AND t.trace->>'source'='llm' AND ($1='supervisor' OR s.owner_id=$2)) AS median`,[viewer.role,viewer.id]);
+    (SELECT percentile_cont(0.5) WITHIN GROUP(ORDER BY (t.trace->'timings'->>'router')::double precision) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE t.status='completed' AND t.trace->>'source' IN ('llm','slot','confirmation') AND ($1='supervisor' OR s.owner_id=$2)) AS median`,[viewer.role,viewer.id]);
   const row=result.rows[0]; return {sessions:Number(row.sessions),turns:Number(row.turns),handoffs:Number(row.handoffs),medianRoutingMs:row.median==null?null:Math.round(Number(row.median))};
 }

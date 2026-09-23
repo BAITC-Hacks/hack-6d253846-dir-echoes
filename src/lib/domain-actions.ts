@@ -4,6 +4,7 @@ import { addDays, addMonths, array, calculatePrice, DomainError, lookupKnowledge
 
 export type ActionContext = { dataset: Dataset; store: EntityStore; scenario: Scenario; slots: JsonObject; clientId: string | null; sessionId: string; requestId: string; preview: boolean };
 export type ActionPlan = { results: ActionResult[]; writes: { kind: string; id: string; value: JsonObject }[]; facts: JsonObject; clientId: string | null; handoff?: { queue: string; reason: string }; warnings: string[] };
+export const MUTATING_ACTIONS = new Set(["create_policy", "renew_policy", "update_policy", "cancel_policy", "create_claim", "create_dispute", "book_inspection", "book_appointment", "update_contact", "resend_documents", "request_document", "send_sms", "create_callback", "create_complaint", "report_fraud", "transfer_to_operator"]);
 
 const prefixes: Record<string, string> = { ogpo: "OGPO", casco: "CASCO", travel: "TRVL", property: "PROP", accident: "NS", dms: "DMS" };
 const statusNames: Record<string, string> = { active: "действует", expired: "срок истёк", not_yet_active: "ещё не вступил в силу", cancelled: "расторгнут", pending_payment: "ожидает оплаты", paid: "выплата произведена", approved: "выплата одобрена", documents_requested: "ожидаются документы", under_review: "на рассмотрении", registered: "зарегистрирован" };
@@ -23,7 +24,7 @@ export async function planActions(context: ActionContext): Promise<ActionPlan> {
     return [...values.values()];
   };
   const stage = (kind: string, id: string, value: JsonObject) => { writes.push({ kind, id, value }); };
-  const record = (name: string, data: JsonObject, status: ActionResult["status"] = "read") => { results.push({ name, status, data }); facts[name] = data; };
+  const record = (name: string, data: JsonObject, status: ActionResult["status"] = "read") => { results.push({ name, status: preview && MUTATING_ACTIONS.has(name) ? "preview" : status, data }); facts[name] = data; };
   const createdAt = new Date().toISOString();
   const unique = async (kind: string, prefix: string) => {
     for (let i = 0; i < 10; i++) { const id = `${prefix}${(parseInt(randomUUID().replace(/-/g, "").slice(0, 12), 16) % 900000) + 100000}`; if (!await get(kind, id)) return id; }
@@ -65,6 +66,13 @@ export async function planActions(context: ActionContext): Promise<ActionPlan> {
     const id = `${prefix}${randomUUID()}`;
     stage(kind, id, { id, ...payload, client_id: clientId, session_id: sessionId, request_id: requestId, created_at: createdAt }); return id;
   };
+  const manualFulfillment = (kind: string, id: string, queue: string, description: string) => {
+    const staged = writes.findLast(w => w.kind === kind && w.id === id);
+    if (staged) Object.assign(staged.value, { fulfillment_queue: queue, fulfillment_session_id: sessionId, fulfillment_status: "waiting" });
+    handoff = { queue, reason: `${description}: ${id}` };
+    facts.manual_fulfillment = { request_kind: kind, request_id: id, queue, status: "waiting", note: "An authenticated supervisor must arrange fulfillment; external service completion is not claimed." };
+    record("transfer_to_operator", { queue, request_id: id, request_kind: kind, status: "waiting", reason: description }, "queued");
+  };
   const cover = async (p: JsonObject, service: string): Promise<JsonObject> => {
     requireActive(p, dataset.businessDate);
     if (p.product !== "dms") throw new DomainError("not_covered", "Для медицинской услуги нужен полис ДМС.", "Медициналық қызмет үшін ДМС полисі қажет.", undefined, true);
@@ -84,8 +92,7 @@ export async function planActions(context: ActionContext): Promise<ActionPlan> {
   };
 
   for (const name of scenario.actions) {
-    const irreversible = dataset.actions.find(a => a.name === name)?.irreversible ?? false;
-    const changeStatus: ActionResult["status"] = preview && irreversible ? "preview" : "executed";
+    const changeStatus: ActionResult["status"] = preview && MUTATING_ACTIONS.has(name) ? "preview" : "executed";
     switch (name) {
       case "find_client": {
         const c = await client(); record(name, { client_id: c.client_id, identified: true }); break;
@@ -196,6 +203,7 @@ export async function planActions(context: ActionContext): Promise<ActionPlan> {
         }
         const id = request(name === "book_appointment" ? "appointments" : "inspections", { ...data, status: "request_pending" });
         record(name, { ...data, request_id: id, status: "request_pending", slot_datetime: null, note: "Request persisted. There is no connected scheduling inventory; time is not confirmed." }, preview ? "preview" : "queued");
+        manualFulfillment(name === "book_appointment" ? "appointments" : "inspections", id, name === "book_appointment" ? "medical_assistance_24_7" : "claims_team", name === "book_appointment" ? "Согласовать время медицинского приёма" : "Согласовать время осмотра автомобиля");
         warnings.push("Booking request is saved; actual appointment time needs an operator with scheduling access."); break;
       }
       case "check_coverage": { const data = await cover(await policy(), string(slots.service_name)); record(name, data); if (data.covered === null) warnings.push("Exact medical service cannot be determined from the available package terms."); break; }
@@ -233,7 +241,8 @@ export async function planActions(context: ActionContext): Promise<ActionPlan> {
       }
       case "create_callback": {
         const id = request("callbacks", { phone: slots.phone, requested_time: slots.callback_time, status: "waiting" });
-        record(name, { request_id: id, callback_time: slots.callback_time, status: "waiting", note: "Callback request queued; time is requested, not confirmed." }, "queued"); break;
+        record(name, { request_id: id, callback_time: slots.callback_time, status: "waiting", note: "Callback request queued; time is requested, not confirmed." }, "queued");
+        manualFulfillment("callbacks", id, "operator_general", "Согласовать и выполнить обратный звонок"); break;
       }
       case "create_complaint": {
         const id = request("complaints", { complaint_text: slots.complaint_text, phone: slots.phone ?? null, status: "registered" }, "T-");
@@ -253,7 +262,7 @@ export async function planActions(context: ActionContext): Promise<ActionPlan> {
           || (id === "SC30" && object(facts.check_payment).payment_status === "charged_policy_not_issued")
           || (id === "SC38" && /сообщил|передал|назвал.*код|shared|айттым|жібердім/.test(allText))
           || (id === "SC34" && /не помог|still|көмектесп/.test(allText));
-        if (should) { handoff = { queue: scenario.handoff?.queue ?? "operator_general", reason: scenario.name }; record(name, { queue: handoff.queue, status: "waiting", note: "Request queued for an authenticated supervisor; live telephony transfer is not connected." }, "queued"); }
+        if (should && !handoff) { handoff = { queue: scenario.handoff?.queue ?? "operator_general", reason: scenario.name }; record(name, { queue: handoff.queue, status: "waiting", note: "Request queued for an authenticated supervisor; live telephony transfer is not connected." }, "queued"); }
         break;
       }
       default: throw new DomainError("service_unavailable", "Действие отсутствует в исполнительном модуле.", "Орындау модулінде әрекет жоқ.", undefined, true);

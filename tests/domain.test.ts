@@ -90,7 +90,9 @@ organizerTest("topic switch saves appointment context and restores it without ci
   const store = new MemoryStore();
   const first = await run(store, decision("SC21", { phone: "+77010000002", doctor_specialty: "therapist" }));
   assert.equal(first.state.lastQuestionSlot, "preferred_date"); assert.equal(first.state.slots.city, "Astana");
-  const detour = await run(store, decision("SC33", { city: "Almaty" }), first.state);
+  const detourPreview = await run(store, decision("SC33", { city: "Almaty" }), first.state);
+  assert.ok(detourPreview.state.pendingConfirmation); assert.equal(store.writes, 0);
+  const detour = await run(store, decision("SC33", {}, { confirmation: "confirm", isContinuation: true }), detourPreview.state);
   assert.equal(detour.state.activeScenarioId, "SC21"); assert.equal(detour.state.slots.city, "Astana");
   assert.equal(detour.state.slots.doctor_specialty, "therapist");
   assert.equal(detour.state.lastQuestionSlot, "preferred_date");
@@ -105,6 +107,8 @@ organizerTest("appointment records honest pending request instead of inventing a
   const result = complete.actions.find(a => a.name === "book_appointment");
   assert.equal(result?.data.slot_datetime, null); assert.equal(result?.data.status, "request_pending");
   assert.equal((await store.list("appointments")).length, 1);
+  assert.equal(complete.handoff?.queue, "medical_assistance_24_7");
+  assert.equal((await store.list("appointments"))[0].fulfillment_status, "waiting");
 });
 
 organizerTest("invalid calendar dates are rejected before actions", () => {
@@ -119,16 +123,20 @@ organizerTest("urgent scenario precedes ordinary intent and preserves the latter
   assert.equal(result.state.lastQuestionSlot, "injured"); assert.match(result.reply, /сто двенадцать/);
 });
 
-organizerTest("two unresolved low-confidence turns queue human handoff", async () => {
+organizerTest("two unresolved low-confidence turns offer handoff and wait for consent", async () => {
   const store = new MemoryStore(), d = decision("SYS_UNCLEAR", {}, { scenarios: [{ scenarioId: "SYS_UNCLEAR", confidence: 0.2, reason: "unclear" }] });
   const first = await run(store, d), second = await run(store, d, first.state);
-  assert.equal(first.handoff, undefined); assert.equal(second.handoff?.queue, "operator_general"); assert.equal(second.state.status, "handoff");
+  assert.equal(first.handoff, undefined); assert.equal(second.handoff, undefined); assert.equal(second.state.status, "active");
+  assert.ok(second.state.pendingConfirmation); assert.equal(store.writes, 0);
+  const confirmed = await run(store, decision("SC37", {}, { confirmation: "confirm", isContinuation: true }), second.state);
+  assert.equal(confirmed.handoff?.queue, "operator_general"); assert.equal(confirmed.state.status, "handoff");
 });
 
-organizerTest("unsupported source tariff is handed off rather than fabricated", async () => {
+organizerTest("unsupported source tariff offers specialist review without fabricating a price", async () => {
   const store = new MemoryStore();
   const result = await run(store, decision("SC03", { car_value: 7800000, car_year: 2013, package: "Lite" }));
-  assert.ok(result.handoff); assert.equal(result.actions[0]?.error?.code, "not_eligible"); assert.equal(store.writes, 0);
+  assert.equal(result.handoff, undefined); assert.ok(result.state.pendingConfirmation);
+  assert.equal(result.actions[0]?.error?.code, "not_eligible"); assert.equal(store.writes, 0);
 });
 
 organizerTest("changed persisted refund conditions require a fresh confirmation", async () => {
@@ -165,9 +173,11 @@ organizerTest("an issuance request stays pending payment and never invents a pay
   assert.equal(result.actions.find(a => a.name === "send_sms")?.data.delivery_status, "provider_not_configured");
 });
 
-organizerTest("document resend creates an outbox record without claiming delivery", async () => {
+organizerTest("document resend requires consent before queuing and never claims delivery", async () => {
   const store = new MemoryStore();
-  const result = await run(store, decision("SC26", { phone: "+77010000009" }));
+  const preview = await run(store, decision("SC26", { phone: "+77010000009" }));
+  assert.ok(preview.state.pendingConfirmation); assert.equal(store.writes, 0);
+  const result = await run(store, decision("SC26", {}, { confirmation: "confirm", isContinuation: true }), preview.state);
   const action = result.actions.find(a => a.name === "resend_documents")!;
   assert.equal(action.status, "queued"); assert.equal(action.data.sent_to, null);
   assert.equal((await store.list("outbox")).length, 1);

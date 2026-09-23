@@ -35,8 +35,10 @@ export async function processTurn(sessionId: string, viewer: Viewer, input: {tex
     if(prior.session.state.status==="handoff") {
       const trace:Trace={scenarios:[],alternatives:[],reason:"Сообщение клиента сохранено в обращении для оператора",language:prior.session.state.language,slots:{},actions:[],timings:{stt:input.sttMs??null,router:0,executor:0,response:0,serverTotal:Math.round(performance.now()-started)},catalogHash:dataset.hash,model:"operator_queue",usage:{inputTokens:0,outputTokens:0,estimatedUsd:0},source:"operator",warnings:[]};
       await transaction(async sql=>{
-        await sessionRow(sessionId,viewer,sql,true);
-        await sql.query("UPDATE turns SET assistant_text=$2,trace=$3::jsonb,status='completed' WHERE id=$1",[turnId,"Сообщение сохранено в обращении. Оператор увидит его в истории.",JSON.stringify(trace)]);
+        const current=await sessionRow(sessionId,viewer,sql,true);
+        if(current.busy_token!==turnId || current.version!==prior.session.version || current.state.status!=="handoff") throw new ApiError(409,"Состояние обращения изменилось. Обновите историю перед следующей репликой.");
+        const acknowledgement=current.state.language==="kk"?"Хабарлама өтініште сақталды. Оператор оны сөйлесу тарихынан көреді.":"Сообщение сохранено в обращении. Оператор увидит его в истории.";
+        await sql.query("UPDATE turns SET assistant_text=$2,trace=$3::jsonb,status='completed' WHERE id=$1",[turnId,acknowledgement,JSON.stringify(trace)]);
         await sql.query("UPDATE sessions SET version=version+1,updated_at=now() WHERE id=$1",[sessionId]);
         await sql.query("UPDATE handoffs SET summary=right(summary || $2,6000),updated_at=now() WHERE session_id=$1 AND status<>'closed'",[sessionId,redact(`\nКлиент: ${input.text}`)]);
       });
@@ -49,10 +51,14 @@ export async function processTurn(sessionId: string, viewer: Viewer, input: {tex
     await transaction(async sql=>{
       const current=await sessionRow(sessionId,viewer,sql,true);
       if(current.busy_token!==turnId || current.version!==prior.session.version) throw new ApiError(409,"Разговор изменился. Обновите историю перед следующей репликой.");
+      // Actions share a small company dataset. Serialize the short execution phase
+      // so cross-scenario entity locks cannot deadlock or race a confirmed quote.
+      // LLM and speech calls remain outside this transaction.
+      await sql.query("SELECT pg_advisory_xact_lock(684217391)");
       execution=await executeTurn({dataset,state:structuredClone(current.state),decision:routed.decision,text:input.text,store:entityStore(sql),sessionId,requestId:input.requestId});
-      trace={scenarios:routed.decision.scenarios,alternatives:routed.decision.alternatives,reason:routed.decision.reason,language:routed.decision.language,responseLanguage:routed.decision.responseLanguage,slots:routed.decision.slots,actions:execution.actions,
+      trace={scenarios:routed.decision.scenarios,alternatives:routed.decision.alternatives,reason:routed.decision.reason,language:routed.decision.language,responseLanguage:routed.decision.responseLanguage,tone:routed.decision.tone,slots:routed.decision.slots,actions:execution.actions,
         timings:{stt:input.mode==="voice"?input.sttMs??null:null,router:routed.elapsedMs,executor:Math.round(performance.now()-executionStart),response:0,serverTotal:Math.round(performance.now()-started)},
-        catalogHash:dataset.hash,model:routed.model,usage:{inputTokens:routed.inputTokens,outputTokens:routed.outputTokens,estimatedUsd:routed.estimatedUsd},source:"llm",warnings:execution.warnings};
+        catalogHash:dataset.hash,model:routed.model,usage:{inputTokens:routed.inputTokens,outputTokens:routed.outputTokens,estimatedUsd:routed.estimatedUsd},source:routed.source||"llm",warnings:execution.warnings};
       if(execution.handoff) await putHandoff(sql,sessionId,execution.handoff.queue,execution.handoff.reason,redact([...history.slice(-6).map(t=>`${t.role}: ${t.content}`),`user: ${input.text}`,`assistant: ${execution.reply}`].join("\n")).slice(0,6000));
       await sql.query("UPDATE sessions SET state=$2::jsonb,version=version+1,title=CASE WHEN title='Новый разговор' THEN $3 ELSE title END,updated_at=now() WHERE id=$1",[sessionId,JSON.stringify(execution.state),redact(input.text).slice(0,70)]);
       await sql.query("UPDATE turns SET assistant_text=$2,trace=$3::jsonb,status='finalizing' WHERE id=$1",[turnId,execution.reply,JSON.stringify(trace)]);

@@ -6,6 +6,9 @@ import { consumeLimit, query, transaction } from "@/lib/db";
 import { initialState } from "@/lib/domain";
 import { processTurn } from "@/lib/conversation";
 import { transcribeAudio, synthesizeSpeech } from "@/lib/ai";
+import { getBudgetStatus } from "@/lib/budget";
+import { streamAndCacheAudio } from "@/lib/speech-stream";
+import { getSupervision, saveReview, saveCatalogRevision, catalogPatchSchema } from "@/lib/supervision";
 import { asHandoff, getSessionDetail, listHandoffs, listSessions, redact, sessionRow, stats } from "@/lib/repository";
 import type { Trace } from "@/lib/types";
 
@@ -36,10 +39,25 @@ async function handle(request:Request,context:Context):Promise<Response>{
     }
   }
   const user=await requireViewer();
+  if(path[0]==="supervision" && path.length===1 && method==="GET") {
+    await requireViewer("supervisor");
+    return json(await getSupervision(user,await getDataset()));
+  }
+  if(path[0]==="reviews" && path.length===1 && method==="POST") {
+    await requireViewer("supervisor");
+    const data=await body(request,z.object({turnId:z.string().min(1).max(100),expectedScenario:z.string().min(1).max(50),note:z.string().trim().max(1500).optional()}));
+    return json({review:await saveReview({...data,viewer:user,dataset:await getDataset()})});
+  }
+  if(path[0]==="catalog" && path[1] && path.length===2 && method==="PATCH") {
+    await requireViewer("supervisor");
+    const data=await body(request,z.object({expectedHash:z.string().length(64),patch:catalogPatchSchema}));
+    if(!await consumeLimit(`catalog:${user.id}`,30,3600)) throw new ApiError(429,"Достигнут часовой лимит правок каталога.");
+    return json({revision:await saveCatalogRevision({...data,scenarioId:path[1],viewer:user,dataset:await getDataset()})});
+  }
   if(path[0]==="bootstrap" && method==="GET"){
     const dataset=await getDataset();
-    const [sessions,handoffs,metrics]=await Promise.all([listSessions(user),listHandoffs(user),stats(user)]);
-    return json(redact({viewer:{role:user.role},stats:metrics,catalog:dataset.scenarios,sessions,handoffs,businessDate:dataset.businessDate,configured:{database:true,ai:Boolean(process.env.OPENAI_API_KEY)},datasetHash:dataset.hash}));
+    const [sessions,handoffs,metrics,budget]=await Promise.all([listSessions(user),listHandoffs(user),stats(user),user.role==="supervisor"?getBudgetStatus():Promise.resolve(null)]);
+    return json(redact({viewer:{role:user.role},stats:metrics,budget,catalog:dataset.scenarios,sessions,handoffs,businessDate:dataset.businessDate,configured:{database:true,ai:Boolean(process.env.OPENAI_API_KEY)},datasetHash:dataset.hash}));
   }
   if(path[0]==="sessions"){
     const id=path[1];
@@ -71,7 +89,7 @@ async function handle(request:Request,context:Context):Promise<Response>{
     if(Number(request.headers.get("content-length")||0)>3_500_000) throw new ApiError(413,"Запись слишком большая. Говорите не дольше 45 секунд.");
     const form=await request.formData(); const audio=form.get("audio");
     if(!(audio instanceof File)||audio.size<100||audio.size>3_000_000) throw new ApiError(400,"Нужна аудиозапись размером до 3 МБ.");
-    if(!/^(audio\/(webm|mp4|mpeg|wav|x-wav|ogg)|video\/webm)/i.test(audio.type)) throw new ApiError(400,"Этот аудиоформат не поддерживается.");
+    if(!/^(audio\/(webm|mp4|mpeg|wav|x-wav)|video\/webm)(;|$)/i.test(audio.type)) throw new ApiError(400,"Этот аудиоформат не поддерживается.");
     return json(await transcribeAudio(audio));
   }
   if(path[0]==="speech" && method==="POST"){
@@ -79,38 +97,57 @@ async function handle(request:Request,context:Context):Promise<Response>{
     const detail=await getSessionDetail(data.sessionId,user); const turn=detail.turns.find(t=>t.id===data.turnId);
     if(!turn) throw new ApiError(404,"Ответ не найден.");
     const speechText=redact(turn.assistantText);
-    const textHash=createHash("sha256").update(speechText).update(process.env.TTS_MODEL||"gpt-4o-mini-tts").digest("hex");
-    const readCached=()=>query<{data:Buffer;mime:string;first_byte_ms:number}>("SELECT data,mime,first_byte_ms FROM speech_audio WHERE turn_id=$1 AND text_hash=$2",[turn.id,textHash]);
-    const audioResponse=(cached:{data:Buffer;mime:string;first_byte_ms:number})=>new Response(new Uint8Array(cached.data),{headers:{...noStore,"Content-Type":cached.mime,"X-TTS-First-Byte-Ms":String(cached.first_byte_ms),"X-Audio-Cached":"true"}});
+    const speechLanguage=turn.trace.responseLanguage || turn.trace.language;
+    const textHash=createHash("sha256").update(speechText).update(JSON.stringify([process.env.TTS_MODEL||"gpt-4o-mini-tts","coral",speechLanguage,turn.trace.tone||"neutral"])).digest("hex");
+    // Ownership was checked above. Identical saved answers may reuse the same audio;
+    // text, voice, model, language and tone all participate in the content key.
+    const readCached=()=>query<{data:Buffer;mime:string;first_byte_ms:number}>("SELECT data,mime,first_byte_ms FROM speech_audio WHERE text_hash=$1 LIMIT 1",[textHash]);
+    const audioResponse=async(cached:{data:Buffer;mime:string;first_byte_ms:number})=>{
+      await query("UPDATE turns SET trace=jsonb_set(trace,'{timings}',(trace->'timings') || $2::jsonb) WHERE id=$1 AND NOT (trace->'timings' ? 'ttsFirstByte')",[turn.id,JSON.stringify({ttsFirstByte:0,ttsCacheHit:true})]);
+      return new Response(new Uint8Array(cached.data),{headers:{...noStore,"Content-Type":cached.mime,"X-TTS-First-Byte-Ms":"0","X-Audio-Cached":"true","X-Audio-Delivery":"cached"}});
+    };
     const cached=await readCached(); if(cached.rows[0]) return audioResponse(cached.rows[0]);
     if(!await consumeLimit(`tts:${user.id}`,30,300)) throw new ApiError(429,"Слишком много запросов озвучивания.");
     const leaseToken=randomUUID();
-    const lease=await query("INSERT INTO speech_leases(turn_id,token,expires_at) VALUES($1,$2,now()+interval '60 seconds') ON CONFLICT(turn_id) DO UPDATE SET token=EXCLUDED.token,expires_at=EXCLUDED.expires_at WHERE speech_leases.expires_at<now() RETURNING token",[turn.id,leaseToken]);
+    const lease=await query("INSERT INTO speech_content_leases(text_hash,token,expires_at) VALUES($1,$2,now()+interval '60 seconds') ON CONFLICT(text_hash) DO UPDATE SET token=EXCLUDED.token,expires_at=EXCLUDED.expires_at WHERE speech_content_leases.expires_at<now() RETURNING token",[textHash,leaseToken]);
     if(!lease.rows.length) throw new ApiError(409,"Этот ответ уже озвучивается. Попробуйте воспроизвести его через несколько секунд.");
+    let streaming=false;
+    let source:ReadableStream<Uint8Array>|undefined;
+    const release=async()=>{await query("DELETE FROM speech_content_leases WHERE text_hash=$1 AND token=$2",[textHash,leaseToken]);};
     try {
       const fresh=await readCached(); if(fresh.rows[0]) return audioResponse(fresh.rows[0]);
-      const speech=await synthesizeSpeech(speechText,turn.trace.responseLanguage || turn.trace.language);
-      const bytes=new Uint8Array(await speech.response.arrayBuffer());
+      const speech=await synthesizeSpeech(speechText,speechLanguage,turn.trace.tone,request.signal);
       const mime=speech.response.headers.get("content-type")||"audio/mpeg";
-      if(bytes.length>4_000_000) throw new ApiError(502,"Ответ аудиосервиса слишком большой.");
-      await query("INSERT INTO speech_audio(turn_id,text_hash,data,mime,first_byte_ms) VALUES($1,$2,$3,$4,$5) ON CONFLICT(turn_id) DO UPDATE SET text_hash=EXCLUDED.text_hash,data=EXCLUDED.data,mime=EXCLUDED.mime,first_byte_ms=EXCLUDED.first_byte_ms",[turn.id,textHash,Buffer.from(bytes),mime,Math.round(speech.firstByteMs)]);
+      if(!speech.response.body) throw new ApiError(502,"Аудиосервис не вернул поток ответа.");
+      source=speech.response.body;
       await query("UPDATE turns SET trace=jsonb_set(trace,'{timings}',(trace->'timings') || $2::jsonb) WHERE id=$1",[turn.id,JSON.stringify({ttsFirstByte:Math.round(speech.firstByteMs)})]);
-      return new Response(bytes,{headers:{...noStore,"Content-Type":mime,"X-TTS-First-Byte-Ms":String(Math.round(speech.firstByteMs))}});
-    } finally { await query("DELETE FROM speech_leases WHERE turn_id=$1 AND token=$2",[turn.id,leaseToken]); }
+      const audioStream=streamAndCacheAudio({source:speech.response.body,release,save:async bytes=>{
+        await query("INSERT INTO speech_audio(turn_id,text_hash,data,mime,first_byte_ms) VALUES($1,$2,$3,$4,$5) ON CONFLICT(turn_id) DO UPDATE SET text_hash=EXCLUDED.text_hash,data=EXCLUDED.data,mime=EXCLUDED.mime,first_byte_ms=EXCLUDED.first_byte_ms",[turn.id,textHash,Buffer.from(bytes),mime,Math.round(speech.firstByteMs)]);
+      }});
+      streaming=true;
+      return new Response(audioStream,{headers:{...noStore,"Content-Type":mime,"X-TTS-First-Byte-Ms":String(Math.round(speech.firstByteMs)),"X-Audio-Delivery":"stream"}});
+    } finally { if(!streaming) {await source?.cancel().catch(()=>{});await release();} }
   }
   if(path[0]==="handoffs" && path[1] && method==="PATCH"){
     await requireViewer("supervisor");
     const data=await body(request,z.object({status:z.enum(["active","closed"]),message:z.string().trim().max(2000).optional()}));
     const handoff=await transaction(async sql=>{
+      const reference=await sql.query<{session_id:string}>("SELECT session_id FROM handoffs WHERE id=$1",[path[1]]);
+      if(!reference.rows[0]) throw new ApiError(404,"Обращение не найдено.");
+      const sessionId=reference.rows[0].session_id;
+      // All queue mutations lock session before handoff, matching conversation processing.
+      const session=await sessionRow(sessionId,user,sql,true);
       const record=await sql.query<Record<string,unknown>>("SELECT * FROM handoffs WHERE id=$1 FOR UPDATE",[path[1]]);
       if(!record.rows[0]) throw new ApiError(404,"Обращение не найдено.");
-      const row=record.rows[0]; const sessionId=String(row.session_id);
-      const session=await sessionRow(sessionId,user,sql,true);
+      const row=record.rows[0];
       if(row.status==="closed") throw new ApiError(409,"Обращение уже закрыто.");
       if(data.status==="closed") await sql.query("UPDATE sessions SET state=jsonb_set(state,'{status}','\"closed\"'::jsonb),version=version+1,updated_at=now() WHERE id=$1",[sessionId]);
-      if(data.message){
-        const trace:Trace={scenarios:[],alternatives:[],reason:"Ответ оператора",language:session.state.language,slots:{},actions:[],timings:{stt:null,router:0,executor:0,response:0,serverTotal:0},catalogHash:"",model:"human",usage:{inputTokens:0,outputTokens:0,estimatedUsd:0},source:"operator",warnings:[]};
-        await sql.query("INSERT INTO turns(id,session_id,request_id,user_text,assistant_text,mode,trace,status) VALUES($1,$2,$3,'',$4,'operator',$5::jsonb,'completed')",[randomUUID(),sessionId,randomUUID(),data.message,JSON.stringify(trace)]);
+      const changed=row.status!==data.status;
+      const statusMessage=session.state.language==="kk"?(data.status==="closed"?"Оператор өтінішті аяқтады.":"Оператор өтінішті қабылдады."):(data.status==="closed"?"Оператор завершил обращение.":"Оператор принял обращение в работу.");
+      const message=[changed?statusMessage:"",data.message||""].filter(Boolean).join("\n\n");
+      if(message){
+        const trace:Trace={scenarios:[],alternatives:[],reason:changed?"Изменение статуса обращения оператором":"Ответ оператора",language:session.state.language,slots:{handoffId:path[1],status:data.status},actions:[],timings:{stt:null,router:0,executor:0,response:0,serverTotal:0},catalogHash:"",model:"human",usage:{inputTokens:0,outputTokens:0,estimatedUsd:0},source:"operator",warnings:[]};
+        await sql.query("INSERT INTO turns(id,session_id,request_id,user_text,assistant_text,mode,trace,status) VALUES($1,$2,$3,'',$4,'operator',$5::jsonb,'completed')",[randomUUID(),sessionId,randomUUID(),message,JSON.stringify(trace)]);
         await sql.query("UPDATE sessions SET updated_at=now() WHERE id=$1",[sessionId]);
       }
       const updated=await sql.query("UPDATE handoffs SET status=$2,updated_at=now() WHERE id=$1 RETURNING *",[path[1],data.status]);

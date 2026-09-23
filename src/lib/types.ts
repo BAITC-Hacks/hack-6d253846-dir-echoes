@@ -1,6 +1,7 @@
 export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 export type JsonObject = { [key: string]: Json };
 export type Language = "ru" | "kk" | "mixed";
+export type ReplyTone = "neutral" | "calm" | "reassuring";
 export type Role = "participant" | "supervisor";
 export type Scenario = {
   scenario_id: string; slug: string; name: string; description: string;
@@ -24,7 +25,7 @@ export type ScenarioChoice = { scenarioId: string; confidence: number; reason: s
 export type RoutingDecision = {
   scenarios: ScenarioChoice[]; alternatives: ScenarioChoice[];
   language: Language; slots: JsonObject; isContinuation: boolean;
-  responseLanguage?: "ru" | "kk";
+  responseLanguage?: Language; tone?: ReplyTone;
   confirmation: "confirm" | "reject" | "none";
   reason: string; clarification: string | null;
 };
@@ -38,14 +39,14 @@ export type DialogueState = {
   unclearCount: number; lastQuestionSlot: string | null; lookupFailures: number;
   status: "active" | "handoff" | "closed";
 };
-export type Timings = { stt: number | null; router: number; executor: number; response: number; serverTotal: number; ttsFirstByte?: number; playback?: number };
+export type Timings = { stt: number | null; router: number; executor: number; response: number; serverTotal: number; ttsFirstByte?: number; playback?: number; ttsCacheHit?: boolean };
 export type Trace = {
   scenarios: ScenarioChoice[]; alternatives: ScenarioChoice[]; reason: string;
   language: Language; slots: JsonObject; actions: ActionResult[];
-  responseLanguage?: "ru" | "kk";
+  responseLanguage?: Language; tone?: ReplyTone;
   timings: Timings; catalogHash: string; model: string;
   usage: { inputTokens: number; outputTokens: number; estimatedUsd: number };
-  source: "llm" | "confirmation" | "operator"; warnings: string[];
+  source: "llm" | "confirmation" | "slot" | "operator"; warnings: string[];
 };
 export type Turn = { id: string; sessionId: string; requestId: string; userText: string; assistantText: string; createdAt: string; trace: Trace; mode: "text" | "voice" | "operator" };
 export type Session = { id: string; title: string; createdAt: string; updatedAt: string; state: DialogueState; version: number; turnCount: number };
@@ -59,4 +60,4 @@ export interface EntityStore {
 }
 export type ExecuteInput = { dataset: Dataset; state: DialogueState; decision: RoutingDecision; text: string; store: EntityStore; sessionId: string; requestId: string };
 export type ExecuteOutput = { state: DialogueState; actions: ActionResult[]; reply: string; facts: JsonObject; handoff?: { queue: string; reason: string }; warnings: string[] };
-export type RouterOutput = { decision: RoutingDecision; model: string; elapsedMs: number; inputTokens: number; outputTokens: number; estimatedUsd: number };
+export type RouterOutput = { decision: RoutingDecision; model: string; source?: "llm" | "confirmation" | "slot"; elapsedMs: number; inputTokens: number; outputTokens: number; estimatedUsd: number };

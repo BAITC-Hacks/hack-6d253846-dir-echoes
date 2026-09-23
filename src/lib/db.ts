@@ -35,7 +35,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_open_handoff ON handoffs(session_id) WHERE
 CREATE TABLE IF NOT EXISTS rate_limits (key text PRIMARY KEY, count integer NOT NULL, reset_at timestamptz NOT NULL);
 CREATE TABLE IF NOT EXISTS review_annotations (id text PRIMARY KEY, turn_id text NOT NULL REFERENCES turns(id), reviewer_id text NOT NULL, expected_scenario text NOT NULL, note text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS speech_audio (turn_id text PRIMARY KEY REFERENCES turns(id), text_hash text NOT NULL, data bytea NOT NULL, mime text NOT NULL, first_byte_ms integer NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
-CREATE TABLE IF NOT EXISTS speech_leases (turn_id text PRIMARY KEY REFERENCES turns(id), token text NOT NULL, expires_at timestamptz NOT NULL);
+CREATE INDEX IF NOT EXISTS speech_audio_content ON speech_audio(text_hash);
+CREATE TABLE IF NOT EXISTS speech_content_leases (text_hash text PRIMARY KEY, token text NOT NULL, expires_at timestamptz NOT NULL);
 `;
 
 async function connect(): Promise<Connection> {

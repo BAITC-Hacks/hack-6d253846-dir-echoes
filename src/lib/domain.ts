@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ActionResult, DialogueState, ExecuteInput, ExecuteOutput, Json, JsonObject, Scenario } from "./types";
-import { planActions, statusLabel, type ActionPlan } from "./domain-actions";
+import { MUTATING_ACTIONS, planActions, statusLabel, type ActionPlan } from "./domain-actions";
 import { array, DomainError, localized, lookupKnowledge, mask, normalizeSlot, object, policyStatus, present, productForScenario, regionFromPlate, string } from "./domain-data";
 
 export function initialState(): DialogueState {
@@ -24,13 +24,27 @@ function safeSlots(slots: JsonObject): JsonObject {
   return result;
 }
 
-function reviewSignature(input: ExecuteInput, plan: ActionPlan): string {
-  return JSON.stringify(plan.results.filter(a => input.dataset.actions.some(def => def.name === a.name && def.irreversible)).map(a => {
-    const data = { ...a.data };
-    for (const key of ["request_id", "ticket_id", "claim_number"]) delete data[key];
-    if (["create_policy", "renew_policy"].includes(a.name)) delete data.policy_number;
-    return { action: a.name, data };
-  }));
+function reviewSignature(plan: ActionPlan): string {
+  // Every planned write is covered. Random IDs are represented by their stable plan position;
+  // timestamps and HTTP request IDs never force an otherwise identical second preview.
+  const identifiers = new Map(plan.writes.map((write, index) => [write.id, `planned:${write.kind}:${index}`]));
+  const ignored = new Set(["created_at", "updated_at", "applied_at", "createdAt", "session_id", "request_id", "outbox_id", "ticket_id"]);
+  const normalize = (value: Json): Json => {
+    if (typeof value === "string") {
+      let normalized = value;
+      for (const [id, replacement] of identifiers) normalized = normalized.replaceAll(id, replacement);
+      return normalized;
+    }
+    if (Array.isArray(value)) return value.map(normalize);
+    if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().filter(key => !ignored.has(key)).map(key => [key, normalize(value[key])]));
+    return value;
+  };
+  const reviewed: JsonObject = {
+    actions: plan.results.filter(action => MUTATING_ACTIONS.has(action.name)).map(action => ({ action: action.name, data: normalize(action.data) })),
+    writes: plan.writes.map(write => ({ kind: write.kind, data: normalize(write.value) })),
+    handoff: plan.handoff ? normalize(plan.handoff) : null,
+  };
+  return createHash("sha256").update(JSON.stringify(reviewed)).digest("hex");
 }
 
 function confirmationSummary(scenario: Scenario, slots: JsonObject, plan: ActionPlan, language: DialogueState["language"]): string {
@@ -43,6 +57,12 @@ function confirmationSummary(scenario: Scenario, slots: JsonObject, plan: Action
     if (a.name === "create_claim") return localized(language, `Зарегистрировать страховой случай от ${slots.incident_date}: ${mask(string(slots.incident_description))}`, `${slots.incident_date} күнгі сақтандыру оқиғасын тіркеу: ${mask(string(slots.incident_description))}`);
     if (a.name === "create_dispute") return localized(language, `Зарегистрировать несогласие по ${slots.claim_number}: ${mask(string(slots.complaint_text))}`, `${slots.claim_number} бойынша келіспеушілікті тіркеу: ${mask(string(slots.complaint_text))}`);
     if (a.name === "update_policy") return localized(language, `Изменить полис ${slots.policy_number}: ${scenario.scenario_id === "SC04" ? `добавить водителя ${mask(string(slots.new_driver_iin))}` : `госномер ${slots.vehicle_plate}`}${d.extra_premium === null ? "; доплату рассчитает специалист" : `; доплата ${d.extra_premium} тенге`}`, `${slots.policy_number} полисін өзгерту: ${scenario.scenario_id === "SC04" ? `жүргізушіні қосу ${mask(string(slots.new_driver_iin))}` : `көлік нөмірі ${slots.vehicle_plate}`}`);
+    if (a.name === "create_callback") return localized(language, `Сохранить просьбу об обратном звонке на ${slots.callback_time}; время согласует специалист`, `${slots.callback_time} уақытына кері қоңырау сұранысын сақтау; уақытты маман келіседі`);
+    if (a.name === "create_complaint") return localized(language, `Зарегистрировать жалобу: ${mask(string(slots.complaint_text))}`, `Шағымды тіркеу: ${mask(string(slots.complaint_text))}`);
+    if (a.name === "report_fraud") return localized(language, `Зарегистрировать сообщение о подозрительном обращении: ${mask(string(slots.fraud_details))}`, `Күдікті хабарласу туралы хабарламаны тіркеу: ${mask(string(slots.fraud_details))}`);
+    if (a.name === "send_sms") return localized(language, `Сохранить запрос SMS на ${string(d.recipient)}; доставка пока недоступна`, `${string(d.recipient)} нөміріне SMS сұранысын сақтау; жеткізу әзірге қолжетімсіз`);
+    if (a.name === "resend_documents" || a.name === "request_document") return localized(language, `Сохранить запрос документа на ${string(d.destination_masked)}; доставка пока недоступна`, `${string(d.destination_masked)} мекенжайына құжат сұранысын сақтау; жеткізу әзірге қолжетімсіз`);
+    if (a.name === "transfer_to_operator") return localized(language, "Передать запрос и контекст специалисту", "Сұраныс пен контекстті маманға беру");
     return scenario.name;
   });
   return values.join("; ");
@@ -51,7 +71,11 @@ function confirmationSummary(scenario: Scenario, slots: JsonObject, plan: Action
 function fallbackReply(scenario: Scenario, plan: ActionPlan, state: DialogueState): string {
   const lang = state.language, find = (name: string) => object(plan.facts[name]);
   const quote = plan.results.find(a => prices.includes(a.name));
-  if (plan.handoff) return localized(lang, "Запрос и контекст сохранены в очереди специалиста. Оператор сможет продолжить разговор здесь.", "Сұраныс пен контекст маман кезегінде сақталды. Оператор әңгімені осы жерде жалғастыра алады.");
+  if (plan.handoff) {
+    const manual = object(plan.facts.manual_fulfillment);
+    if (manual.request_id) return localized(lang, `Запрос ${manual.request_id} сохранён и передан специалисту для согласования. Время и внешнее исполнение ещё не подтверждены.`, `${manual.request_id} сұранысы сақталып, келісу үшін маманға берілді. Уақыт пен сыртқы орындалу әлі расталған жоқ.`);
+    return localized(lang, "Запрос и контекст сохранены в очереди специалиста. Оператор сможет продолжить разговор здесь.", "Сұраныс пен контекст маман кезегінде сақталды. Оператор әңгімені осы жерде жалғастыра алады.");
+  }
   switch (scenario.scenario_id) {
     case "SC01": case "SC03": case "SC07": case "SC08": return localized(lang, `Стоимость по условиям программы — ${quote?.data.price} тенге. Расчёт сохранён в истории разговора.`, `Бағдарлама шарттары бойынша құны — ${quote?.data.price} теңге. Есеп әңгіме тарихында сақталды.`);
     case "SC02": case "SC06": case "SC27": { const d = find(scenario.scenario_id === "SC27" ? "renew_policy" : "create_policy"); return localized(lang, `Заявка ${d.policy_number} сохранена, стоимость ${d.price} тенге. Полис ожидает оплаты; платёжная ссылка пока недоступна.`, `${d.policy_number} өтінімі сақталды, құны ${d.price} теңге. Полис төлемді күтуде; төлем сілтемесі әзірге қолжетімсіз.`); }
@@ -134,9 +158,25 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
   state.language = decision.responseLanguage ?? (decision.language === "mixed" ? (input.state.language === "kk" ? "kk" : "ru") : decision.language);
   const output: ExecuteOutput = { state, actions: [], reply: "", facts: {}, warnings: [] };
   const text = (ru: string, kk: string) => localized(state.language, ru, kk);
-  const handoff = (queue: string, reason: string): ExecuteOutput => {
+  const handoff = (queue: string, reason: string, authorized = false): ExecuteOutput => {
+    const selectedQueue = dataset.queues.includes(queue) ? queue : "operator_general";
+    if (!authorized) {
+      if (state.activeScenarioId && state.activeScenarioId !== "SC37") {
+        state.slotsByScenario[state.activeScenarioId] = structuredClone(state.slots);
+        if (!state.suspendedScenarioIds.includes(state.activeScenarioId)) state.suspendedScenarioIds.push(state.activeScenarioId);
+      }
+      const snapshot: JsonObject = { __handoff: true, __handoff_queue: selectedQueue, __handoff_reason: reason };
+      const summary = text("Передать запрос и контекст специалисту", "Сұраныс пен контекстті маманға беру");
+      state.activeScenarioId = "SC37"; state.status = "active"; state.lastQuestionSlot = null;
+      state.slots = snapshot; state.slotsByScenario.SC37 = snapshot;
+      state.pendingConfirmation = { id: randomUUID(), scenarioId: "SC37", actionNames: ["transfer_to_operator"], slots: snapshot, summary, createdAt: new Date().toISOString() };
+      output.actions.push({ name: "transfer_to_operator", status: "preview", data: { queue: selectedQueue } });
+      output.facts = { ...output.facts, confirmation_required: true, proposed_queue: selectedQueue };
+      output.reply = text("Могу передать запрос и контекст специалисту. Подтверждаете?", "Сұраныс пен контекстті маманға бере аламын. Растайсыз ба?");
+      return output;
+    }
     state.status = "handoff"; state.pendingConfirmation = null;
-    output.handoff = { queue: dataset.queues.includes(queue) ? queue : "operator_general", reason };
+    output.handoff = { queue: selectedQueue, reason };
     output.actions.push({ name: "transfer_to_operator", status: "queued", data: { queue: output.handoff.queue, status: "waiting" } });
     output.reply = text("Запрос и контекст переданы в очередь специалиста. Оператор сможет продолжить этот разговор.", "Сұраныс пен контекст маман кезегіне берілді. Оператор осы әңгімені жалғастыра алады."); return output;
   };
@@ -144,7 +184,28 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
   const candidates = decision.scenarios.filter(c => dataset.scenarios.some(s => s.scenario_id === c.scenarioId) || dataset.systemIntents.some(s => s.id === c.scenarioId));
   const ranked = [...candidates].sort((a, b) => Number(dataset.scenarios.find(s => s.scenario_id === b.scenarioId)?.priority === "urgent") - Number(dataset.scenarios.find(s => s.scenario_id === a.scenarioId)?.priority === "urgent"));
   const primary = ranked[0];
-  if (primary?.scenarioId === "SC37" && primary.confidence >= 0.45) return handoff("operator_general", "Client requested a human operator");
+  const pendingHandoff = state.pendingConfirmation?.slots.__handoff === true ? state.pendingConfirmation : null;
+  if (pendingHandoff && (!primary || primary.scenarioId === "SC37" || primary.scenarioId === "SYS_UNCLEAR")) {
+    if (decision.confirmation === "reject") {
+      state.pendingConfirmation = null; state.unclearCount = 0;
+      state.activeScenarioId = state.suspendedScenarioIds.pop() ?? null;
+      state.slots = state.activeScenarioId ? structuredClone(state.slotsByScenario[state.activeScenarioId] ?? {}) : {};
+      output.reply = text("Передача отменена. Продолжим разговор здесь.", "Маманға беру тоқтатылды. Әңгімені осы жерде жалғастырайық."); return output;
+    }
+    if (decision.confirmation === "confirm") {
+      const previous = await store.get("operations", pendingHandoff.id);
+      const result = handoff(string(pendingHandoff.slots.__handoff_queue), string(pendingHandoff.slots.__handoff_reason), true);
+      if (previous) { result.handoff = undefined; result.reply = string(previous.reply); result.warnings.push("Operator handoff consent was already applied."); return result; }
+      await store.put("operations", pendingHandoff.id, { id: pendingHandoff.id, scenario_id: "SC37", reply: result.reply, session_id: input.sessionId, applied_at: new Date().toISOString() });
+      return result;
+    }
+    if (decision.isContinuation || primary?.scenarioId === "SYS_UNCLEAR") {
+      output.facts = { confirmation_required: true, proposed_queue: pendingHandoff.slots.__handoff_queue };
+      output.reply = text("Передать запрос специалисту? Ответьте «да» или «нет».", "Сұранысты маманға берейін бе? «Иә» немесе «жоқ» деп жауап беріңіз."); return output;
+    }
+  }
+  // A direct request to connect a person is already the client's decision.
+  if (primary?.scenarioId === "SC37" && primary.confidence >= 0.45) return handoff(pendingHandoff ? string(pendingHandoff.slots.__handoff_queue) : "operator_general", pendingHandoff ? string(pendingHandoff.slots.__handoff_reason) : "Client requested a human operator", true);
   if (primary?.scenarioId === "SYS_GOODBYE" && primary.confidence >= 0.75) { state.status = "closed"; state.pendingConfirmation = null; output.reply = text("Спасибо за обращение. Всего доброго!", "Хабарласқаныңызға рақмет. Сау болыңыз!"); return output; }
   if (primary?.scenarioId === "SYS_OUT_OF_SCOPE" && primary.confidence >= 0.75) { output.reply = text("Я помогаю с услугами страхования Saqta: авто, ДМС, поездки, имущество и несчастные случаи. Какой вопрос по этим услугам вас интересует?", "Мен Saqta сақтандыруы бойынша көмектесемін: көлік, ДМС, саяхат, мүлік және жазатайым оқиғалар. Осы қызметтер бойынша қандай сұрағыңыз бар?"); return output; }
   const continued = decision.isContinuation && !!state.activeScenarioId && (!primary || primary.scenarioId === state.activeScenarioId || primary.scenarioId === "SYS_UNCLEAR");
@@ -219,7 +280,6 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
       output.reply = urgent + defaultQuestion(input, state, missing); output.facts = { awaiting_slot: missing, queued_scenarios: state.pendingScenarioIds }; return output;
     }
     state.lastQuestionSlot = null;
-    const needsConfirmation = scenario.requires_confirmation || scenario.actions.some(name => dataset.actions.some(a => a.name === name && a.irreversible));
     const pending = state.pendingConfirmation;
     const confirmed = !!pending && pending.scenarioId === targetId && decision.confirmation === "confirm" && !changedWhilePending;
     if (confirmed) {
@@ -232,18 +292,43 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
       // The operation is executed using its persisted snapshot, never newly guessed arguments.
       state.slots = structuredClone(pending.slots);
     }
-    const plan = await planActions({ dataset, store, scenario, slots: state.slots, clientId: state.clientId, sessionId: input.sessionId, requestId: input.requestId, preview: needsConfirmation && !confirmed });
-    const signature = reviewSignature(input, plan);
+    const plan = await planActions({ dataset, store, scenario, slots: state.slots, clientId: state.clientId, sessionId: input.sessionId, requestId: input.requestId, preview: !confirmed });
+    const needsConfirmation = plan.writes.length > 0 || Boolean(plan.handoff);
+    const signature = reviewSignature(plan);
     const changedAtExecution = confirmed && pending.slots.__review !== signature;
     output.facts = { ...plan.facts, slots: safeSlots(state.slots), queued_scenarios: state.pendingScenarioIds };
     output.warnings.push(...plan.warnings);
     if (needsConfirmation && (!confirmed || changedAtExecution)) {
-      const previewPlan = { ...plan, results: plan.results.map(a => dataset.actions.some(def => def.name === a.name && def.irreversible) ? { ...a, status: "preview" as const } : a) };
+      const previewPlan = { ...plan, results: plan.results.map(a => MUTATING_ACTIONS.has(a.name) ? { ...a, status: "preview" as const } : a) };
       const summary = confirmationSummary(scenario, state.slots, previewPlan, state.language);
       const snapshot = { ...structuredClone(state.slots), __review: signature };
-      state.pendingConfirmation = { id: changedAtExecution ? randomUUID() : pending?.id ?? randomUUID(), scenarioId: targetId, actionNames: scenario.actions.filter(name => dataset.actions.some(a => a.name === name && a.irreversible)), slots: snapshot, summary, createdAt: changedAtExecution ? new Date().toISOString() : pending?.createdAt ?? new Date().toISOString() };
+      state.pendingConfirmation = { id: changedAtExecution ? randomUUID() : pending?.id ?? randomUUID(), scenarioId: targetId, actionNames: [...new Set(plan.results.filter(action => MUTATING_ACTIONS.has(action.name)).map(action => action.name))], slots: snapshot, summary, createdAt: changedAtExecution ? new Date().toISOString() : pending?.createdAt ?? new Date().toISOString() };
       output.actions = plan.results.map(a => a.status === "executed" || a.status === "queued" ? { ...a, status: "preview" } : a);
-      output.reply = `${changedAtExecution ? text("Условия изменились: ", "Шарттар өзгерді: ") : ""}${summary}. ${text("Подтверждаете?", "Растайсыз ба?")}`;
+      const safety = targetId === "SC11" ? text("Если есть пострадавшие, сразу звоните сто двенадцать. ", "Зардап шеккендер болса, бірден жүз он екіге қоңырау шалыңыз. ") : targetId === "SC38" ? text("Никому не сообщайте SMS-коды, CVV и PIN. ", "Ешкімге SMS кодын, CVV және PIN айтпаңыз. ") : "";
+      const office = object(plan.facts.get_offices);
+      let readAnswer = targetId === "SC33" && office.address ? text(`Офис: ${office.address}, ${office.hours}. `, `Кеңсе: ${office.address}, ${office.hours}. `) : "";
+      if (targetId === "SC23") {
+        const clinics = array(object(plan.facts.list_clinics).clinics).map(value => { const clinic = object(value); return `${clinic.name} — ${clinic.address}`; }).join("; ");
+        readAnswer = text(`Клиники: ${clinics}. `, `Емханалар: ${clinics}. `);
+      }
+      if (targetId === "SC24") readAnswer = text("Электронная карта находится в приложении в разделе «Мои полисы». ", "Электрондық карта қосымшадағы «Менің полистерім» бөлімінде орналасқан. ");
+      if (targetId === "SC34") readAnswer = `${fallbackReply(scenario, { ...plan, handoff: undefined }, state)} `;
+      if (targetId === "SC18") {
+        const documents: Record<string, [string, string]> = {
+          "ID card": ["удостоверение личности", "жеке куәлік"], "Driving licence": ["водительское удостоверение", "жүргізуші куәлігі"],
+          "Vehicle registration certificate": ["свидетельство о регистрации автомобиля", "көлікті тіркеу куәлігі"],
+          "Road accident documents from the police": ["документы полиции о ДТП", "полицияның ЖКО туралы құжаттары"], "Bank details": ["банковские реквизиты", "банк деректемелері"],
+          "Photos of the damage": ["фотографии повреждений", "зақымдардың фотосуреттері"], "Policy number": ["номер полиса", "полис нөмірі"],
+          "Police documents (if police was involved)": ["документы полиции, если она участвовала", "полиция қатысса, оның құжаттары"],
+          "Act from the building management company (for water damage) or fire service report (for fire)": ["акт управляющей компании при затоплении или пожарной службы при пожаре", "су басқанда басқарушы компания актісі немесе өрт кезінде өрт қызметінің актісі"],
+          "Medical certificate from the trauma centre or hospital": ["медицинская справка из травмпункта или больницы", "жарақат пунктінен немесе ауруханадан медициналық анықтама"],
+          "Medical documents from abroad": ["медицинские документы из-за границы", "шетелдегі медициналық құжаттар"],
+          "Receipts (only for expenses agreed with assistance)": ["чеки только по расходам, согласованным с ассистансом", "ассистанспен келісілген шығындардың түбіртектері"],
+        };
+        const list = array(object(plan.facts.kb_lookup).documents).map(value => { const label = string(value), translated = documents[label]; return translated ? text(...translated) : label; }).join(", ");
+        if (list) readAnswer = text(`Нужны: ${list}. `, `Қажет құжаттар: ${list}. `);
+      }
+      output.reply = `${safety}${readAnswer}${changedAtExecution ? text("Условия изменились: ", "Шарттар өзгерді: ") : ""}${summary}. ${text("Подтверждаете?", "Растайсыз ба?")}`;
       output.facts.confirmation_required = true; return output;
     }
     for (const write of plan.writes) await store.put(write.kind, write.id, write.value);
