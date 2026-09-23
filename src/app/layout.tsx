@@ -5,6 +5,11 @@ export const metadata: Metadata = {
   title: "DIR ECHOES — Voice Router",
   description: "Рабочее пространство голосового маршрутизатора: разговор, выбор сценария и контроль исполнения.",
   robots: { index: false, follow: false },
+  icons: {
+    icon: { url: "/brand/dir-echoes-mark.png", type: "image/png" },
+    shortcut: "/brand/dir-echoes-mark.png",
+    apple: "/brand/dir-echoes-mark.png",
+  },
 };
 
 export const viewport: Viewport = {

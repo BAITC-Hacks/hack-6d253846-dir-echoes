@@ -157,7 +157,10 @@ export function usePlaybackMeter() {
           // The analyser is a side branch. Its creation/reads cannot mute sound.
           if (!active.analyser) {
             active.analyser = active.context.createAnalyser();
-            active.analyser.fftSize = 1024;
+            // At 48 kHz, 1024 samples covered only 21 ms of each 67 ms
+            // measurement interval. Use an overlapping window so a short word
+            // between animation updates still contributes real audio energy.
+            active.analyser.fftSize = 4096;
             active.samples = new Float32Array(active.analyser.fftSize);
           }
           source.connect(active.analyser);

@@ -223,14 +223,22 @@ export function useVoiceCall(options: VoiceCallOptions) {
       let lastTick = performance.now();
       let lastPublishedAt = 0;
       let lastPublishedStatus: VoiceCallStatus = "requesting";
+      let pendingLevelPeak = 0;
 
       const resetCandidate = () => { candidateSince = null; candidateVoicedMs = 0; candidateLastAt = 0; };
       const display = (status: VoiceCallStatus, level = 0, elapsedMs = 0) => {
         const now = performance.now();
+        const measuring = status === "listening" || status === "speaking"
+          || status === "calibrating" || status === "settling";
+        // VAD samples every 20 ms, but React publishes only about 10 times/s.
+        // Preserve measured syllable peaks between renders instead of exposing
+        // only whichever sample happened to coincide with the publish deadline.
+        pendingLevelPeak = measuring ? Math.max(pendingLevelPeak, level) : 0;
         if (status === lastPublishedStatus && now - lastPublishedAt < 100) return;
         lastPublishedAt = now;
         lastPublishedStatus = status;
-        publish({ status, micLevel: Math.round(level * 100) / 100, elapsedMs: Math.round(elapsedMs / 100) * 100 });
+        publish({ status, micLevel: Math.round(pendingLevelPeak * 100) / 100, elapsedMs: Math.round(elapsedMs / 100) * 100 });
+        pendingLevelPeak = 0;
       };
       const rearm = () => {
         busy = false;
@@ -258,7 +266,7 @@ export function useVoiceCall(options: VoiceCallOptions) {
         observedPaused = paused;
       };
 
-      const beginClip = (now: number, lastVoicedAt = now) => {
+      const beginClip = (now: number, lastVoicedAt: number, level: number) => {
         if (!alive() || optionsRef.current.paused || busy) return;
         const recorder = new MediaRecorder(destination.stream, { mimeType: mime, audioBitsPerSecond: 64_000 });
         const clip: Clip = {
@@ -303,26 +311,27 @@ export function useVoiceCall(options: VoiceCallOptions) {
         // pre-roll; slicing arbitrary WebM/MP4 chunks would lose their headers.
         recorder.start(200);
         resetCandidate();
-        display("speaking", 0, now - clip.speechStartedAt);
+        display("speaking", level, now - clip.speechStartedAt);
       };
 
       const recoverBufferedSpeech = (frames: Frame[], now: number, threshold: number, after = 0) => {
         // Audio remained in the delay while the UI was calibrating/settling.
         // Recover a brief phrase that already ended instead of requiring the
         // customer to keep speaking until the microphone status changes.
-        let onset: number | null = null, voiced = 0, lastVoiced = 0;
-        let candidate: { onset: number; voiced: number; lastVoiced: number } | null = null;
+        let onset: number | null = null, voiced = 0, lastVoiced = 0, peakRms = 0;
+        let candidate: { onset: number; voiced: number; lastVoiced: number; peakRms: number } | null = null;
         for (const frame of frames) {
           if (frame.at < after || frame.rms < threshold) continue;
-          if (onset === null || frame.at - lastVoiced > 100) { onset = frame.at - frame.duration; voiced = 0; }
+          if (onset === null || frame.at - lastVoiced > 100) { onset = frame.at - frame.duration; voiced = 0; peakRms = 0; }
           voiced += frame.duration;
           lastVoiced = frame.at;
-          if (voiced >= ATTACK_MS) candidate = { onset, voiced, lastVoiced };
+          peakRms = Math.max(peakRms, frame.rms);
+          if (voiced >= ATTACK_MS) candidate = { onset, voiced, lastVoiced, peakRms };
         }
         if (!candidate || now - candidate.onset >= PRE_ROLL_MS - 40) return;
         candidateSince = candidate.onset;
         candidateVoicedMs = candidate.voiced;
-        beginClip(now, candidate.lastVoiced);
+        beginClip(now, candidate.lastVoiced, Math.min(1, candidate.peakRms * 8));
       };
 
       const finishClip = (clip: Clip, drain: boolean) => {
@@ -420,7 +429,7 @@ export function useVoiceCall(options: VoiceCallOptions) {
             candidateSince ??= now - frameMs;
             candidateVoicedMs += frameMs;
             candidateLastAt = now;
-            if (candidateVoicedMs >= ATTACK_MS) beginClip(now);
+            if (candidateVoicedMs >= ATTACK_MS) beginClip(now, now, level);
           } else {
             if (now - candidateLastAt > 100) resetCandidate();
             noiseFloor = Math.max(0.0015, noiseFloor * 0.97 + rms * 0.03);
