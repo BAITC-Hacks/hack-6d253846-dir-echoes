@@ -10,8 +10,11 @@ import { getBudgetStatus } from "@/lib/budget";
 import { streamAndCacheAudio } from "@/lib/speech-stream";
 import { getSupervision, saveReview, saveCatalogRevision, catalogPatchSchema } from "@/lib/supervision";
 import { getSessionDetail, listHandoffs, listSessions, redact, sessionRow, stats } from "@/lib/repository";
-import { updateHandoff } from "@/lib/handoffs";
+import { takeoverSession, updateHandoff } from "@/lib/handoffs";
 import { recordErrorEvent, type ErrorStage } from "@/lib/error-events";
+import { getOperatorVoice, updateOperatorVoice, operatorVoiceCommandSchema } from "@/lib/operator-rtc";
+import { getSpeechProfile } from "@/lib/speech-profile";
+import type { Trace } from "@/lib/types";
 
 export const runtime="nodejs";
 export const maxDuration=60;
@@ -19,9 +22,9 @@ export const dynamic="force-dynamic";
 type Context={params:Promise<{path:string[]}>};
 const noStore={"Cache-Control":"no-store"};
 const json=(body:unknown,status=200)=>Response.json(body,{status,headers:noStore});
-async function body<T>(request:Request,schema:z.ZodType<T>):Promise<T>{
-  if(Number(request.headers.get("content-length")||0)>20_000) throw new ApiError(413,"Слишком большой запрос.");
-  const text=await request.text(); if(text.length>20_000) throw new ApiError(413,"Слишком большой запрос.");
+async function body<T>(request:Request,schema:z.ZodType<T>,limit=20_000):Promise<T>{
+  if(Number(request.headers.get("content-length")||0)>limit) throw new ApiError(413,"Слишком большой запрос.");
+  const text=await request.text(); if(Buffer.byteLength(text,"utf8")>limit) throw new ApiError(413,"Слишком большой запрос.");
   try { return schema.parse(JSON.parse(text)); } catch { throw new ApiError(400,"Проверьте поля запроса."); }
 }
 async function handle(request:Request,context:Context):Promise<Response>{
@@ -62,6 +65,10 @@ async function handle(request:Request,context:Context):Promise<Response>{
   }
   if(path[0]==="sessions"){
     const id=path[1];
+    if(id && path[2]==="voice" && path.length===3) {
+      if(method==="GET") return json(await getOperatorVoice(id,user));
+      if(method==="POST") return json(await updateOperatorVoice(id,user,await body(request,operatorVoiceCommandSchema,24_000)));
+    }
     if(!id && method==="GET") return json(redact(await listSessions(user)));
     if(!id && method==="POST"){
       await getDataset();
@@ -70,6 +77,11 @@ async function handle(request:Request,context:Context):Promise<Response>{
       return json(await getSessionDetail(newId,user),201);
     }
     if(id && path.length===2 && method==="GET") return json(redact(await getSessionDetail(id,user)));
+    if(id && path.length===3 && path[2]==="takeover" && method==="POST"){
+      await requireViewer("supervisor");
+      const data=await body(request,z.object({requestId:z.string().min(8).max(100)}));
+      return json(redact(await takeoverSession(id,user,data.requestId)));
+    }
     if(id && path[2]==="export" && method==="GET"){
       const detail=redact(await getSessionDetail(id,user));
       return new Response(JSON.stringify({exportedAt:new Date().toISOString(),...detail},null,2),{headers:{...noStore,"Content-Type":"application/json; charset=utf-8","Content-Disposition":`attachment; filename="echoes-${id}.json"`}});
@@ -95,11 +107,15 @@ async function handle(request:Request,context:Context):Promise<Response>{
   }
   if(path[0]==="speech" && method==="POST"){
     const data=await body(request,z.object({sessionId:z.string(),turnId:z.string()}));
-    const detail=await getSessionDetail(data.sessionId,user); const turn=detail.turns.find(t=>t.id===data.turnId);
+    // Speech needs one durable answer, not the complete transcript and handoff list.
+    // Check ownership in the same query; uncommitted answers never reach synthesis.
+    const saved=await query<{id:string;assistant_text:string;trace:Trace}>("SELECT t.id,t.assistant_text,t.trace FROM turns t JOIN sessions s ON s.id=t.session_id WHERE t.id=$1 AND t.session_id=$2 AND t.status='completed' AND ($3='supervisor' OR s.owner_id=$4)",[data.turnId,data.sessionId,user.role,user.id]);
+    const turn=saved.rows[0];
     if(!turn) throw new ApiError(404,"Ответ не найден.");
-    const speechText=redact(turn.assistantText);
+    const speechText=redact(turn.assistant_text);
     const speechLanguage=turn.trace.responseLanguage || turn.trace.language;
-    const textHash=createHash("sha256").update(speechText).update(JSON.stringify([process.env.TTS_MODEL||"gpt-4o-mini-tts","coral","conversational-v2",speechLanguage,turn.trace.tone||"neutral"])).digest("hex");
+    const profile=getSpeechProfile();
+    const textHash=createHash("sha256").update(speechText).update(JSON.stringify([profile.model,profile.voice,profile.styleVersion,speechLanguage,turn.trace.tone||"neutral"])).digest("hex");
     // Ownership was checked above. Identical saved answers may reuse the same audio;
     // text, voice, model, language and tone all participate in the content key.
     const readCached=()=>query<{data:Buffer;mime:string;first_byte_ms:number}>("SELECT data,mime,first_byte_ms FROM speech_audio WHERE text_hash=$1 LIMIT 1",[textHash]);

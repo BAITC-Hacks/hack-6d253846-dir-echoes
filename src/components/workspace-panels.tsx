@@ -44,10 +44,10 @@ export function TracePanel({ detail, catalog, selectedTurnId, onSelectTurn, isSu
         {state && <><ContextThemes title="Следующие темы" ids={state.pendingScenarioIds} catalog={catalog} /><ContextThemes title="Приостановленные" ids={state.suspendedScenarioIds} catalog={catalog} /><ContextThemes title="Завершённые" ids={state.completedScenarioIds} catalog={catalog} /><section className="trace-section"><div className="trace-section-heading"><SlidersHorizontal size={15} /><h3>Собранные параметры</h3></div><SlotList slots={state.slots} /></section></>}
       </> : !trace ? <div className="trace-empty"><div className="trace-diagram" aria-hidden="true"><span><MessageSquare size={18} /></span><i /><span className="trace-diagram-center"><GitBranch size={22} /></span><i /><span><Check size={18} /></span></div><h3>У каждого решения<br />есть объяснение</h3><p>После первой реплики здесь появятся выбранный сценарий, параметры, действия и время обработки.</p><div className="trace-empty-note"><ShieldCheck size={16} /><span>Значимые операции выполняются после подтверждения.</span></div></div> : <>
         <div className="turn-select"><label htmlFor="trace-turn">Реплика</label><select id="trace-turn" value={turn?.id} onChange={e => onSelectTurn(e.target.value)}>{detail?.turns.map((t, index) => <option key={t.id} value={t.id}>{index + 1}. {t.userText.slice(0, 48)}</option>)}</select></div>
-        <section className="trace-section first-trace-section"><div className="trace-section-heading"><GitBranch size={15} /><h3>Выбранный маршрут</h3><span className="micro-badge">{{ llm: "LLM", slot: "Заполнение параметра", operator: "Оператор", confirmation: "Подтверждение" }[trace.source]}</span></div>
+        <section className="trace-section first-trace-section"><div className="trace-section-heading"><GitBranch size={15} /><h3>Выбранный маршрут</h3><span className="micro-badge">{{ llm: "LLM", slot: "Заполнение параметра", operator: "Оператор", confirmation: "Подтверждение", catalog_example: "Точный пример каталога", social: "Приветствие" }[trace.source]}</span></div>
           {trace.scenarios.length ? trace.scenarios.map((choice, index) => <div className="route-choice" key={`${choice.scenarioId}-${index}`}><div className="route-choice-top"><span className="route-number">{String(index + 1).padStart(2, "0")}</span><span className="confidence">{Math.round(choice.confidence * 100)}%</span></div><h4>{scenarioName(catalog, choice.scenarioId)}</h4><p>{choice.reason}</p><div className="confidence-track"><span style={{ width: `${Math.min(100, Math.max(0, choice.confidence * 100))}%` }} /></div></div>) : <div className="soft-note">Сценарий не выбран. {trace.reason}</div>}
           {trace.scenarios.length > 0 && !trace.scenarios.some(choice => choice.reason.trim() === trace.reason.trim()) && <p className="trace-reason">{trace.reason}</p>}
-          <p className="tiny muted">{trace.source === "llm" ? "Проценты — оценка выбора модели." : "Продолжение активного сценария по правилам диалога."}</p>
+          <p className="tiny muted">{trace.source === "llm" ? "Проценты — оценка выбора модели." : trace.source === "catalog_example" ? "Полное уникальное совпадение с примером каталога; без вызова LLM. 100% обозначает точное совпадение, а не измеренную точность." : trace.source === "social" ? "Точное короткое приветствие без делового запроса; без вызова LLM." : trace.source === "operator" ? "Событие очереди или ответ человека." : "Продолжение активного сценария по правилам диалога."}</p>
           {trace.alternatives.length > 0 && <details className="alternatives"><summary>Другие варианты <span>{trace.alternatives.length}</span><ChevronDown size={13} /></summary>{trace.alternatives.map((choice, index) => <div className="alternative" key={`${choice.scenarioId}-${index}`}><strong>{scenarioName(catalog, choice.scenarioId)}</strong><span>{Math.round(choice.confidence * 100)}%</span><p>{choice.reason}</p></div>)}</details>}
         </section>
         <section className="trace-section"><div className="trace-section-heading"><SlidersHorizontal size={15} /><h3>Параметры реплики</h3><span className="micro-badge">{languageLabel(trace.language, trace.inputLanguages)}</span></div><SlotList slots={trace.slots} /></section>
@@ -67,12 +67,12 @@ function ContextThemes({ title, ids, catalog }: { title: string; ids: string[]; 
   return <section className="trace-section"><div className="trace-section-heading"><Layers3 size={15} /><h3>{title}</h3><span className="micro-badge">{ids.length}</span></div>{ids.length ? <ul className="theme-list">{ids.map(id => <li key={id}><span />{scenarioName(catalog, id)}</li>)}</ul> : <p className="muted small">Нет тем.</p>}</section>;
 }
 
-export function HistoryView({ sessions, onOpen, onNew, currentId }: { sessions: Session[]; onOpen: (id: string) => void; onNew: () => void; currentId?: string }) {
+export function HistoryView({ sessions, onOpen, onNew, currentId }: { sessions: Session[]; onOpen: (id: string) => void; onNew?: () => void; currentId?: string }) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
   const filtered = [...sessions].filter(s => (status === "all" || s.state.status === status) && `${s.title} ${s.id}`.toLowerCase().includes(query.toLowerCase())).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   return <section className="collection-page"><div className="collection-toolbar"><div className="search-field"><Search size={17} /><input aria-label="Поиск разговоров" placeholder="Найти разговор…" value={query} onChange={e => setQuery(e.target.value)} /></div><select aria-label="Статус разговора" className="filter-select" value={status} onChange={e => setStatus(e.target.value)}><option value="all">Все статусы</option><option value="active">В работе</option><option value="handoff">У оператора</option><option value="closed">Завершённые</option></select><span className="result-count">Найдено: {filtered.length}</span></div>
-    {!sessions.length ? <EmptyState icon={<History size={26} />} title="Здесь будет история разговоров" description="Разговоры сохраняются. Вы сможете вернуться к обращению и продолжить с того же места." action={{ label: "Начать разговор", onClick: onNew }} /> : !filtered.length ? <EmptyState icon={<Search size={26} />} title="Ничего не найдено" description="Попробуйте изменить запрос или выбрать другой статус." /> : <div className="history-table"><div className="history-table-heading"><span>Разговор</span><span>Статус</span><span>Последнее обращение</span><span /></div>{filtered.map(session => <div className={`history-row ${session.id === currentId ? "history-current" : ""}`} key={session.id}><button className="history-main" onClick={() => onOpen(session.id)}><span className="history-icon"><MessageSquare size={19} /></span><span><strong>{session.title || "Новый разговор"}</strong><small>{session.turnCount} реплик · {languageLabel(session.state.language, session.state.responseLanguages)}{session.id === currentId ? " · Открыт сейчас" : ""}</small></span></button><span className={`status-badge status-${session.state.status}`}><i />{sessionStatus(session.state.status)}</span><span className="history-date">{dateTime(session.updatedAt)}</span><div className="row-actions"><a href={`/api/sessions/${session.id}/export`} download className="icon-button" title="Скачать историю в JSON" aria-label={`Скачать разговор ${session.title}`}><ArrowDownToLine size={17} /></a><button className="icon-button" onClick={() => onOpen(session.id)} aria-label={`Открыть разговор ${session.title}`}><ArrowRight size={18} /></button></div></div>)}</div>}
+    {!sessions.length ? <EmptyState icon={<History size={26} />} title="Здесь будет история разговоров" description="Разговоры сохраняются. Вы сможете вернуться к обращению и продолжить с того же места." action={onNew ? { label: "Начать разговор", onClick: onNew } : undefined} /> : !filtered.length ? <EmptyState icon={<Search size={26} />} title="Ничего не найдено" description="Попробуйте изменить запрос или выбрать другой статус." /> : <div className="history-table"><div className="history-table-heading"><span>Разговор</span><span>Статус</span><span>Последнее обращение</span><span /></div>{filtered.map(session => <div className={`history-row ${session.id === currentId ? "history-current" : ""}`} key={session.id}><button className="history-main" onClick={() => onOpen(session.id)}><span className="history-icon"><MessageSquare size={19} /></span><span><strong>{session.title || "Новый разговор"}</strong><small>{session.turnCount} реплик · {languageLabel(session.state.language, session.state.responseLanguages)}{session.id === currentId ? " · Открыт сейчас" : ""}</small></span></button><span className={`status-badge status-${session.state.status}`}><i />{sessionStatus(session.state.status)}</span><span className="history-date">{dateTime(session.updatedAt)}</span><div className="row-actions"><a href={`/api/sessions/${session.id}/export`} download className="icon-button" title="Скачать историю в JSON" aria-label={`Скачать разговор ${session.title}`}><ArrowDownToLine size={17} /></a><button className="icon-button" onClick={() => onOpen(session.id)} aria-label={`Открыть разговор ${session.title}`}><ArrowRight size={18} /></button></div></div>)}</div>}
   </section>;
 }
 
@@ -96,117 +96,4 @@ export function CatalogView({ catalog, onExample, canEdit = false, catalogHash, 
 
 function ArrowUpRightIcon() { return <ArrowRight size={15} className="example-arrow" />; }
 
-export function OperatorsView({ handoffs, onChanged, onOpen, drafts, requests, onBusyChange }: { handoffs: Handoff[]; onChanged: () => Promise<unknown>; onOpen: (id: string) => void; drafts: Map<string, string>; requests: Map<string, string>; onBusyChange: (busy: boolean) => void }) {
-  const [filter, setFilter] = useState("open");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<SessionDetail | null>(null);
-  const [message, setMessage] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [savedHandoffs, setSavedHandoffs] = useState<Record<string, Handoff>>({});
-  const busyRef = useRef(false);
-  const selectedIdRef = useRef<string | null>(null);
-  const aliveRef = useRef(true);
-  const pollInFlightRef = useRef(false);
-  selectedIdRef.current = selectedId;
-  const effectiveHandoffs = handoffs.map(item => {
-    const saved = savedHandoffs[item.id];
-    return saved && saved.updatedAt >= item.updatedAt ? saved : item;
-  });
-  const filtered = effectiveHandoffs.filter(h => filter === "all" || (filter === "open" ? h.status !== "closed" : h.status === filter));
-  const selected = effectiveHandoffs.find(h => h.id === selectedId);
-
-  useEffect(() => { aliveRef.current = true; return () => { aliveRef.current = false; onBusyChange(false); }; }, [onBusyChange]);
-  useEffect(() => {
-    setMessage(selectedId ? drafts.get(selectedId) ?? "" : ""); setError(null); setNotice(null); setDetail(null);
-    if (!selected) { setLoading(false); return; }
-    let current = true;
-    setLoading(true);
-    api<SessionDetail>(`/api/sessions/${selected.sessionId}`).then(value => { if (current) setDetail(value); }).catch(err => { if (current) setError(readableError(err)); }).finally(() => { if (current) setLoading(false); });
-    return () => { current = false; };
-  }, [selected?.id, selected?.sessionId, selectedId, drafts]);
-
-  useEffect(() => {
-    let stopped = false;
-    const poll = setInterval(async () => {
-      if (document.visibilityState !== "visible" || busyRef.current || pollInFlightRef.current) return;
-      pollInFlightRef.current = true;
-      const targetId = selected?.id;
-      try {
-        await onChanged();
-        if (selected && selected.status !== "closed" && !busyRef.current && !stopped) {
-          const updated = await api<SessionDetail>(`/api/sessions/${selected.sessionId}`);
-          if (!stopped && !busyRef.current && selectedIdRef.current === targetId) setDetail(current => current && current.session.id === updated.session.id && current.session.version > updated.session.version ? current : updated);
-        }
-      } catch { /* Manual refresh remains available; polling never discards a draft. */ }
-      finally { pollInFlightRef.current = false; }
-    }, 5000);
-    return () => { stopped = true; clearInterval(poll); };
-  }, [onChanged, selected?.id, selected?.sessionId, selected?.status]);
-
-  function choose(id: string) {
-    if (busyRef.current || selectedIdRef.current === id) return;
-    selectedIdRef.current = id; setMessage(drafts.get(id) ?? ""); setDetail(null); setLoading(true); setSelectedId(id);
-  }
-
-  async function update(status: "active" | "closed", withMessage: boolean) {
-    if (!selected || selectedIdRef.current !== selected.id || busyRef.current || loading || selected.status === "closed") return;
-    const target = selected;
-    const originalDraft = drafts.get(target.id) ?? message;
-    const sentMessage = withMessage ? originalDraft.trim() : "";
-    if (withMessage && !sentMessage) return;
-    const key = JSON.stringify([target.id, status, sentMessage]);
-    const requestId = requests.get(key) ?? crypto.randomUUID();
-    requests.set(key, requestId);
-    busyRef.current = true; setBusy(true); onBusyChange(true); setError(null); setNotice(null);
-    try {
-      const result = await api<{ handoff: Handoff }>(`/api/handoffs/${target.id}`, { method: "PATCH", body: JSON.stringify({ status, requestId, ...(withMessage ? { message: sentMessage } : {}) }) });
-      requests.delete(key);
-      if (withMessage && drafts.get(target.id) === originalDraft) {
-        drafts.delete(target.id);
-        if (aliveRef.current && selectedIdRef.current === target.id) setMessage("");
-      }
-      if (!aliveRef.current) return;
-      setSavedHandoffs(current => ({ ...current, [target.id]: result.handoff }));
-      if (selectedIdRef.current === target.id) setNotice(status === "closed" ? withMessage ? "Ответ сохранён. Обращение завершено." : "Обращение завершено." : withMessage ? "Ответ сохранён и доступен клиенту." : "Обращение принято в работу. Черновик ответа сохранён.");
-      try {
-        await onChanged();
-        const updated = await api<SessionDetail>(`/api/sessions/${target.sessionId}`);
-        if (aliveRef.current && selectedIdRef.current === target.id) setDetail(updated);
-      } catch {
-        if (aliveRef.current && selectedIdRef.current === target.id) setError("Изменение сохранено, но свежую историю загрузить не удалось. Повторно отправлять ответ не нужно: обновите данные.");
-      }
-    } catch (err) {
-      if (aliveRef.current && selectedIdRef.current === target.id) setError(readableError(err));
-    } finally {
-      busyRef.current = false;
-      if (aliveRef.current) setBusy(false);
-      onBusyChange(false);
-    }
-  }
-
-  return <section className="collection-page">
-    <div className="collection-toolbar"><div className="segmented-control">
-      <button className={filter === "open" ? "active" : ""} disabled={busy} onClick={() => setFilter("open")}>Открытые <span>{effectiveHandoffs.filter(h => h.status !== "closed").length}</span></button>
-      <button className={filter === "closed" ? "active" : ""} disabled={busy} onClick={() => setFilter("closed")}>Завершённые</button>
-      <button className={filter === "all" ? "active" : ""} disabled={busy} onClick={() => setFilter("all")}>Все</button>
-    </div><span className="result-count">{filtered.length} обращений</span></div>
-    {!filtered.length && !selected ? <EmptyState icon={<Headphones size={27} />} title="В очереди нет обращений" description="Здесь появятся разговоры, для которых требуется участие оператора, вместе с контекстом и причиной передачи." /> : <div className="operator-layout">
-      <div className="handoff-list">{filtered.map(h => <button className={`handoff-card ${h.id === selectedId ? "selected" : ""}`} key={h.id} disabled={busy} onClick={() => choose(h.id)}><div><span className={`status-badge status-${h.status}`}><i />{h.status === "waiting" ? "Ожидает" : h.status === "active" ? "В работе" : "Закрыто"}</span><time>{time(h.createdAt)}</time></div><h3>{h.queue}</h3><p>{h.summary || h.reason}</p>{h.summary && h.summary.trim() !== h.reason.trim() && <span className="handoff-reason">{h.reason}</span>}{drafts.get(h.id)?.trim() && <small>Есть черновик ответа</small>}</button>)}</div>
-      <div className="operator-detail">{!selected ? <EmptyState icon={<Headphones size={26} />} title="Выберите обращение" description="Просмотрите историю, примите обращение в работу и ответьте клиенту." /> : <>
-        <div className="operator-detail-header"><div><span className="section-eyebrow">ОБРАЩЕНИЕ ОПЕРАТОРА</span><h2>{selected.queue}</h2></div><button className="button button-secondary button-small" disabled={busy} onClick={() => { if (!busyRef.current) onOpen(selected.sessionId); }}>Открыть диалог<ArrowRight size={14} /></button></div>
-        <div className="handoff-summary"><strong>Контекст передачи</strong><p>{selected.summary || selected.reason}</p>{selected.summary && selected.summary.trim() !== selected.reason.trim() && <span>{selected.reason}</span>}</div>
-        {notice && <div className="closed-note" role="status"><CircleCheck size={17} />{notice}</div>}
-        {error && <ErrorNotice message={error} onDismiss={() => setError(null)} />}
-        {loading ? <div className="inline-loading"><Spinner label="Загружаем историю…" /></div> : <div className="operator-transcript">{detail?.turns.map(turn => <div key={turn.id}>{turn.mode !== "operator" && turn.userText && <p><strong>Клиент</strong>{turn.userText}</p>}<p><strong>{turn.mode === "operator" ? "Оператор" : "DIR ECHOES"}</strong>{turn.assistantText}</p></div>)}</div>}
-        {selected.status !== "closed" ? <div className="operator-compose"><label htmlFor="operator-message">Ответ клиенту</label><textarea id="operator-message" value={message} onChange={e => { const value = e.target.value; drafts.set(selected.id, value); setMessage(value); setNotice(null); }} maxLength={2000} placeholder="Напишите ответ. Он сохранится в разговоре клиента." disabled={busy || loading} /><div>
-          {selected.status === "waiting" && <button className="button button-secondary button-small" onClick={() => void update("active", false)} disabled={busy || loading}>Принять в работу</button>}
-          <button className="button button-primary button-small" disabled={busy || loading || !message.trim()} onClick={() => void update("active", true)}>{busy ? <Spinner /> : <MessageSquare size={14} />}Отправить ответ</button>
-          <button className="button button-ghost button-small" disabled={busy || loading} onClick={() => void update("closed", !!message.trim())}><CircleCheck size={15} />{message.trim() ? "Ответить и завершить" : "Завершить обращение"}</button>
-        </div></div> : <><div className="closed-note"><CircleCheck size={17} />Обращение завершено {dateTime(selected.updatedAt)}.</div>{message.trim() && <div className="soft-note"><strong>Неотправленный черновик</strong><p>Обращение уже закрыто. Текст можно скопировать для дальнейшей работы.</p><textarea aria-label="Неотправленный черновик ответа" value={message} readOnly rows={4} /></div>}</>}
-      </>}</div>
-    </div>}
-  </section>;
-}
+export { OperatorsView } from "./operator-workbench";

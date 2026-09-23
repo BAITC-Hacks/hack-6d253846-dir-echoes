@@ -5,6 +5,7 @@ import { BudgetConfigurationError, BudgetExceededError, markBudgetUnknown, reser
 import { tryFastPath } from "./fast-path";
 import { createPrivacyContext, maskPrivateText, PrivacySlotError, type PrivacyContext } from "./privacy";
 import { effectiveSlots } from "./routing-slots";
+import { getSpeechProfile } from "./speech-profile";
 import { hasUnreviewedLanguages, isLanguage, languageFromList, languagePhrase, normalizeLanguageCode, spokenLanguages, stateLanguages, uniqueLanguages } from "./languages";
 import type { ChatEntry, Dataset, DialogueState, ExecuteOutput, Json, JsonObject, Language, ReplyTone, RouterOutput, RoutingDecision, SpokenLanguage } from "./types";
 
@@ -520,16 +521,16 @@ export async function synthesizeSpeech(text: string, language: Language, tone: R
   let reservation: BudgetReservation | undefined;
   try {
     checkCancelled();
-    const model = process.env.TTS_MODEL || "gpt-4o-mini-tts";
+    const { model, voice, styleVersion } = getSpeechProfile();
     const client = openai();
     const minuteRate = speechRate("TTS_ESTIMATED_USD_PER_MINUTE", 0.03);
     const inputEstimate = Buffer.byteLength(text, "utf8") / 1_000_000;
     const estimatedSeconds = Math.max(15, text.length / 2);
-    reservation = await reserveBudget({ stage: "tts", estimatedUsd: estimatedSeconds / 60 * minuteRate + inputEstimate, metadata: { model, characters: text.length, estimatedSeconds, basis: "slow_speech_character_estimate" } });
+    reservation = await reserveBudget({ stage: "tts", estimatedUsd: estimatedSeconds / 60 * minuteRate + inputEstimate, metadata: { model, voice, styleVersion, characters: text.length, estimatedSeconds, basis: "slow_speech_character_estimate" } });
     checkCancelled();
     const audio = await client.audio.speech.create({
-      model, voice: "coral", input: text, response_format: "mp3",
-      ...(model.startsWith("gpt-4o-mini-tts") ? { instructions: `Speak like a helpful person in a live conversation, with a natural brisk pace and short natural pauses. Avoid an announcer, prerecorded telephone menu, overly formal cadence or exaggerated emphasis. Stay clear and easy to understand; never rush numbers or dates. ${tone === "reassuring" ? "Use warm, gently supportive wording delivery without exaggerated emotion." : tone === "calm" ? "Use a patient and steady conversational delivery, without prolonged pauses." : "Use a friendly, direct conversational delivery."} ${language === "kk" ? "Speak Kazakh." : language === "ru" ? "Speak Russian." : language === "tr" ? "Speak Turkish." : "Detect and preserve the actual language or languages of the supplied text. Pronounce each phrase in its original language, including code-switching, without translation or an assumed default language."} Read the provided text exactly. Pronounce amounts and identifiers accurately as natural spoken numbers, preserving every digit and negation. Do not add, omit or paraphrase any words.` } : {}),
+      model, voice, input: text, response_format: "mp3",
+      ...(model.startsWith("gpt-4o-mini-tts") ? { instructions: `Deliver these words as a warm, attentive person having a live conversation. Use ordinary conversational intonation, a comfortably lively pace and brief pauses at natural meaning boundaries. Connect words fluidly; do not recite them one by one. Avoid an announcer voice, telephone-menu cadence, theatrical emphasis, slow reading or long pauses. ${tone === "reassuring" ? "Sound gently supportive and grounded, without exaggerated emotion or promises." : tone === "calm" ? "Stay patient and composed while keeping a natural conversational rhythm." : "Sound friendly, clear and direct."} ${language === "kk" ? "Use natural Kazakh pronunciation and sentence melody." : language === "ru" ? "Use natural Russian pronunciation and sentence melody." : language === "tr" ? "Use natural Turkish pronunciation and sentence melody." : "Follow the actual language of each phrase, including natural code-switching. Preserve its pronunciation and sentence melody without translating it or imposing a default language."} Speak exactly the supplied words: preserve every condition, negation, amount, date and identifier. Render written numbers naturally and accurately, preserving their full value and any leading zeros in identifiers. Be clear around numbers without slowing the whole sentence. Add no filler, greeting or other words, and omit or paraphrase nothing.` } : {}),
     }, { signal, timeout: AUDIO_TIMEOUT_MS });
     checkCancelled();
     if (!audio.body) throw new Error("Missing audio stream");

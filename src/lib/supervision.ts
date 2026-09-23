@@ -139,7 +139,7 @@ export async function getSupervision(viewer: Viewer, dataset: Dataset) {
       percentile_cont(0.95) WITHIN GROUP(ORDER BY (trace->'timings'->>'serverTotal')::double precision) AS server_p95,
       percentile_cont(0.5) WITHIN GROUP(ORDER BY (trace->'timings'->>'router')::double precision) AS router_p50,
       percentile_cont(0.95) WITHIN GROUP(ORDER BY (trace->'timings'->>'router')::double precision) AS router_p95
-      FROM turns WHERE status='completed' AND trace->>'source' IN ('llm','slot','confirmation')
+      FROM turns WHERE status='completed' AND trace->>'source' IN ('llm','slot','confirmation','catalog_example','social')
       GROUP BY trace->>'source' ORDER BY source`),
     listErrorEvents(viewer),
   ]);

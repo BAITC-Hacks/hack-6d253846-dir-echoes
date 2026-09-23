@@ -48,6 +48,14 @@ CREATE TABLE IF NOT EXISTS error_events (
   http_status integer CHECK(http_status BETWEEN 400 AND 599), created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS error_events_latest ON error_events(created_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS operator_voice_calls (
+  session_id text PRIMARY KEY REFERENCES sessions(id), call_id text NOT NULL UNIQUE, operator_id text NOT NULL,
+  status text NOT NULL CHECK(status IN ('offered','connected','ended')),
+  offer_sdp text CHECK(octet_length(offer_sdp)<=20000), answer_sdp text CHECK(octet_length(answer_sdp)<=20000),
+  offer_hash text NOT NULL, answer_hash text,
+  offer_expires_at timestamptz NOT NULL, sdp_expires_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+);
 `;
 
 async function connect(): Promise<Connection> {

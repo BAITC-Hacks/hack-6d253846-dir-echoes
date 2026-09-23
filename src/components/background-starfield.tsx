@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 
-type Star = { x: number; y: number; speed: number; phase: number; radius: number; alpha: number };
+type Star = { x: number; y: number; velocityX: number; velocityY: number; phase: number; radius: number; alpha: number };
 const FRAME_MS = 1000 / 30;
 const wrap = (value: number) => ((value % 1) + 1) % 1;
 
@@ -21,11 +21,17 @@ export function BackgroundStarfield({ theme = "dark" }: { theme?: "light" | "dar
     const mobile = window.innerWidth < 720 || window.matchMedia("(pointer: coarse)").matches;
     let seed = 0x7105aaf;
     const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
-    const stars: Star[] = Array.from({ length: mobile ? 110 : 180 }, (_, index) => ({
-      x: random(), y: random(), speed: 0.60 + random() * 0.65, phase: random() * Math.PI * 2,
-      radius: index % 61 === 0 ? 1.45 : 0.60 + random() * 0.65,
-      alpha: index % 61 === 0 ? 0.82 : 0.25 + random() * 0.36,
-    }));
+    const stars: Star[] = Array.from({ length: mobile ? 110 : 180 }, (_, index) => {
+      const depth = random(), direction = random() * Math.PI * 2;
+      // CSS pixels per second: nearer grains are a little larger, brighter and
+      // faster. Fixed per-star headings avoid a uniform sliding wallpaper.
+      const speed = 8 + depth * 4;
+      return {
+        x: random(), y: random(), velocityX: Math.cos(direction) * speed, velocityY: Math.sin(direction) * speed, phase: random() * Math.PI * 2,
+        radius: index % 61 === 0 ? 1.45 : 0.55 + depth * 0.75,
+        alpha: index % 61 === 0 ? 0.82 : 0.24 + depth * 0.38,
+      };
+    });
     const projected = stars.map(() => ({ x: 0, y: 0 }));
     const batches: number[][] = Array.from({ length: 8 }, () => []);
     const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -50,8 +56,8 @@ export function BackgroundStarfield({ theme = "dark" }: { theme?: "light" | "dar
       for (const batch of batches) batch.length = 0;
       for (let index = 0; index < stars.length; index++) {
         const star = stars[index];
-        projected[index].x = wrap(star.x + (driftTime * 2.1 * star.speed + Math.sin(driftTime * 0.12 + star.phase) * 7) / width) * width;
-        projected[index].y = wrap(star.y + (-driftTime * 0.85 * star.speed + Math.cos(driftTime * 0.10 + star.phase) * 7) / height) * height;
+        projected[index].x = wrap(star.x + (driftTime * star.velocityX + Math.sin(driftTime * 0.10 + star.phase) * 4) / width) * width;
+        projected[index].y = wrap(star.y + (driftTime * star.velocityY + Math.cos(driftTime * 0.08 + star.phase) * 4) / height) * height;
         batches[Math.min(7, Math.floor(star.alpha * 8))].push(index);
       }
       for (let band = 0; band < batches.length; band++) {

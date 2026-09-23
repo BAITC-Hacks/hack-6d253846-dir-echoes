@@ -12,6 +12,7 @@ import { VoiceParticles } from "./voice-particles";
 import { BackgroundStarfield } from "./background-starfield";
 import { ConversationContext } from "./conversation-context";
 import { ConversationThread } from "./conversation-thread";
+import { OperatorVoiceControls } from "./operator-voice-controls";
 import { api, ApiError, type Bootstrap, duration, ErrorNotice, readableError, sessionStatus, Spinner, type WorkspaceView } from "./workspace-ui";
 import { BrandMark as Logo } from "./brand-mark";
 
@@ -22,7 +23,7 @@ const viewCopy: Record<WorkspaceView, { title: string; subtitle: string }> = {
   conversation: { title: "Разговор с AI", subtitle: "Говорите на удобном языке. Мы сохраним контекст разговора." },
   history: { title: "История разговоров", subtitle: "Все обращения, решения и контекст. Продолжайте с места остановки." },
   catalog: { title: "Каталог сценариев", subtitle: "Доступные маршруты, условия и действия из подключённого каталога." },
-  operators: { title: "Очередь оператора", subtitle: "Обращения, которым нужно внимание человека. Весь контекст уже здесь." },
+  operators: { title: "Live · Диалоги", subtitle: "Разговоры всех участников, состояние AI и подключение оператора." },
   supervision: { title: "Контроль качества", subtitle: "Ручная проверка маршрутов, ошибки исполнения и версии каталога." },
 };
 
@@ -100,11 +101,15 @@ export function VoiceWorkspace() {
   }
 
   const rememberSession = useCallback((value: SessionDetail) => {
+    const current = detailRef.current;
+    if (current?.session.id === value.session.id && (value.session.version < current.session.version || (value.session.version === current.session.version && value.turns.length < current.turns.length))) return current;
     detailRef.current = value;
     setDetail(value);
+    if (value.session.state.status === "handoff") setShowChat(true);
     setSelectedTurnId(value.turns.at(-1)?.id ?? null);
     try { localStorage.setItem(SESSION_KEY, value.session.id); } catch { /* Storage may be unavailable in private browsing. */ }
     setBootstrap(current => current ? { ...current, sessions: [value.session, ...current.sessions.filter(s => s.id !== value.session.id)] } : current);
+    return value;
   }, []);
 
   const refreshBootstrap = useCallback(async () => {
@@ -120,10 +125,11 @@ export function VoiceWorkspace() {
       const auth = await api<{ authenticated: boolean; role?: Role }>("/api/auth");
       setAuthenticated(auth.authenticated);
       if (auth.authenticated) {
-        await refreshBootstrap();
+        const initialized = await refreshBootstrap();
+        setView(initialized.viewer.role === "supervisor" ? "operators" : "conversation");
         let savedId: string | null = null;
         try { savedId = localStorage.getItem(SESSION_KEY); } catch { /* Optional convenience only. */ }
-        if (savedId) {
+        if (savedId && initialized.viewer.role !== "supervisor") {
           try { rememberSession(await api<SessionDetail>(`/api/sessions/${encodeURIComponent(savedId)}`)); }
           catch (err) {
             if (err instanceof ApiError && err.status === 404) {
@@ -176,22 +182,29 @@ export function VoiceWorkspace() {
     return () => { document.removeEventListener("visibilitychange", hidden); window.removeEventListener("pagehide", leave); };
   }, []);
   useEffect(() => {
-    if (!authenticated || detail?.session.state.status !== "handoff") return;
+    if (!authenticated || !detail?.session.id || detail.session.state.status === "closed" || view !== "conversation") return;
     let stopped = false;
+    let inFlight = false;
     const poll = setInterval(async () => {
-      if (document.visibilityState !== "visible" || submittingRef.current || phase) return;
+      if (document.visibilityState !== "visible" || inFlight) return;
       const sessionId = detailRef.current?.session.id;
       if (!sessionId) return;
+      inFlight = true;
       try {
         const updated = await api<SessionDetail>(`/api/sessions/${sessionId}`);
-        if (!stopped && detailRef.current?.session.id === sessionId && (updated.session.version !== detailRef.current.session.version || updated.turns.length !== detailRef.current.turns.length)) {
+        const current = detailRef.current;
+        if (!stopped && current?.session.id === sessionId && updated.session.version >= current.session.version && (updated.session.version !== current.session.version || updated.turns.length !== current.turns.length || JSON.stringify(updated.handoffs) !== JSON.stringify(current.handoffs))) {
+          const controlChanged = updated.session.state.status !== current.session.state.status;
+          if (controlChanged && updated.session.state.status !== "active") stopCallRef.current();
+          if (submittingRef.current && !controlChanged) return;
           rememberSession(updated);
           await refreshBootstrap();
         }
       } catch { /* A manual refresh remains available when polling cannot reach the server. */ }
-    }, 5000);
+      finally { inFlight = false; }
+    }, 2000);
     return () => { stopped = true; clearInterval(poll); };
-  }, [authenticated, detail?.session.state.status, phase, refreshBootstrap, rememberSession]);
+  }, [authenticated, detail?.session.id, detail?.session.state.status, view, refreshBootstrap, rememberSession]);
   useEffect(() => {
     if (!helpOpen) return;
     const onKey = (event: KeyboardEvent) => {
@@ -377,12 +390,12 @@ export function VoiceWorkspace() {
       const requestId = previous?.sessionId === active.session.id && previous.text === text.trim() && previous.mode === mode ? previous.requestId : crypto.randomUUID();
       pendingRequestRef.current = { sessionId: active.session.id, text: text.trim(), mode, requestId };
       result = await api<SessionDetail>(`/api/sessions/${active.session.id}/turn`, { method: "POST", body: JSON.stringify({ text: text.trim(), requestId, mode, ...(sttMs != null ? { sttMs } : {}) }) });
-      rememberSession(result); pendingRequestRef.current = null;
+      result = rememberSession(result); pendingRequestRef.current = null;
       if (result.session.state.status === "closed" || result.session.state.status === "handoff") voiceCall.stop();
       setDraft(current => current.trim() === text.trim() ? "" : current);
       void refreshBootstrap().catch(() => { /* The saved response is authoritative; the refresh button can retry summaries. */ });
     } catch (err) { handleError(err); } finally { submittingRef.current = false; setPhase(null); }
-    if (result && autoSpeakRef.current && deliveryGeneration === voiceGenerationRef.current && document.visibilityState === "visible" && detailRef.current?.session.id === result.session.id && !sessionChangeRef.current && result.turns.length && result.turns.at(-1)?.assistantText) await playSpeech(result.session.id, result.turns.at(-1)!, cycleStartedAt);
+    if (result && result.session.state.status !== "handoff" && detailRef.current?.session.state.status !== "handoff" && autoSpeakRef.current && deliveryGeneration === voiceGenerationRef.current && document.visibilityState === "visible" && detailRef.current?.session.id === result.session.id && !sessionChangeRef.current && result.turns.length && result.turns.at(-1)?.mode !== "operator" && result.turns.at(-1)?.assistantText) await playSpeech(result.session.id, result.turns.at(-1)!, cycleStartedAt);
     if (mode === "text") textareaRef.current?.focus();
   }
 
@@ -423,6 +436,7 @@ export function VoiceWorkspace() {
     try {
       const opened = await api<SessionDetail>(`/api/sessions/${id}`);
       rememberSession(opened);
+      if (bootstrap?.viewer.role === "supervisor") { setShowChat(true); setTranscriptExpanded(true); setNavigationOpen(true); }
       requestedTurnRef.current = null;
       if (turnId && opened.turns.some(turn => turn.id === turnId)) {
         setSelectedTurnId(turnId); setShowChat(true); setTranscriptExpanded(true); setTraceOpen(true);
@@ -471,7 +485,7 @@ export function VoiceWorkspace() {
   const visibleTurns = transcriptExpanded ? detail?.turns ?? [] : detail?.turns.slice(-1) ?? [];
   const canSendText = currentSession?.state.status !== "closed" && bootstrap.configured.database && (bootstrap.configured.ai || currentSession?.state.status === "handoff");
   const pendingCount = bootstrap.handoffs.filter(h => h.status !== "closed").length;
-  const title = viewCopy[view];
+  const title = bootstrap.viewer.role === "supervisor" && view === "conversation" ? { title: "Просмотр разговора", subtitle: "История клиента и решения AI. Для перехвата откройте Live · Диалоги." } : viewCopy[view];
 
   const phaseLabel = phase === "transcribing" ? "Распознаём речь" : phase === "routing" ? "Выбираем сценарий и готовим ответ" : phase === "synthesizing" ? "Подготавливаем голосовой ответ" : "Готовы слушать";
 
@@ -491,20 +505,20 @@ export function VoiceWorkspace() {
     {view === "conversation" && <BackgroundStarfield theme={theme} />}
     <aside className="sidebar" id="workspace-navigation"><div className="sidebar-brand"><Logo /></div><div className="workspace-label"><span className="workspace-avatar">DE</span><div>Контакт-центр<span>Рабочее пространство</span></div><span className="workspace-online" title="Рабочее пространство загружено" /></div>
       <div className="sidebar-section-label">РАБОТА С ОБРАЩЕНИЯМИ</div><nav className="primary-nav" aria-label="Основная навигация">
-        <NavItem icon={<AudioLines size={19} />} label="Разговор с AI" active={view === "conversation"} disabled={busy} onClick={() => navigateView("conversation")} />
+        {bootstrap.viewer.role !== "supervisor" && <NavItem icon={<AudioLines size={19} />} label="Разговор с AI" active={view === "conversation"} disabled={busy} onClick={() => navigateView("conversation")} />}
         <NavItem icon={<History size={19} />} label="История" count={bootstrap.sessions.length} active={view === "history"} disabled={busy} onClick={() => navigateView("history")} />
         <NavItem icon={<BookOpen size={19} />} label="Сценарии" active={view === "catalog"} disabled={busy} onClick={() => navigateView("catalog")} />
-        {bootstrap.viewer.role === "supervisor" && <NavItem icon={<Headphones size={19} />} label="Очередь оператора" count={pendingCount} active={view === "operators"} disabled={busy} onClick={() => navigateView("operators")} />}
-        {bootstrap.viewer.role === "supervisor" && <NavItem icon={<ShieldCheck size={19} />} label="Супервизор" active={view === "supervision"} disabled={busy} onClick={() => navigateView("supervision")} />}
-      </nav><div className="sidebar-bottom"><div className="sidebar-note"><span className="sidebar-note-icon"><GitBranch size={18} /></span><strong>Голос. Контекст. Решение.</strong><p>Говорите на удобном вам языке.</p></div><button ref={helpButtonRef} className="sidebar-help" onClick={() => { stopVoiceCall(); setHelpOpen(true); }}><CircleHelp size={18} />Как работать с линией<ChevronRight size={14} /></button><div className="sidebar-profile"><span className="profile-avatar">{bootstrap.viewer.role === "supervisor" ? "С" : "У"}</span><span><strong>{bootstrap.viewer.role === "supervisor" ? "Супервизор" : "Участник"}</strong><small>Защищённый доступ</small></span><button onClick={() => void logout()} disabled={busy} aria-label="Выйти" title="Выйти"><LogOut size={16} /></button></div></div>
+        {bootstrap.viewer.role === "supervisor" && <NavItem icon={<Headphones size={19} />} label="Live · Диалоги" count={pendingCount} active={view === "operators"} disabled={busy} onClick={() => navigateView("operators")} />}
+        {bootstrap.viewer.role === "supervisor" && <NavItem icon={<ShieldCheck size={19} />} label="Контроль качества" active={view === "supervision"} disabled={busy} onClick={() => navigateView("supervision")} />}
+      </nav><div className="sidebar-bottom"><div className="sidebar-note"><span className="sidebar-note-icon"><GitBranch size={18} /></span><strong>Голос. Контекст. Решение.</strong><p>Говорите на удобном вам языке.</p></div><button ref={helpButtonRef} className="sidebar-help" onClick={() => { stopVoiceCall(); setHelpOpen(true); }}><CircleHelp size={18} />Как работать с линией<ChevronRight size={14} /></button><div className="sidebar-profile"><span className="profile-avatar">{bootstrap.viewer.role === "supervisor" ? "С" : "У"}</span><span><strong>{bootstrap.viewer.role === "supervisor" ? "Супервизор" : "Клиент"}</strong><small>Защищённый доступ</small></span><button onClick={() => void logout()} disabled={busy} aria-label="Выйти" title="Выйти"><LogOut size={16} /></button></div></div>
     </aside>
     <div className="main-shell"><header className="topbar">{view === "conversation" && <button className="button button-ghost navigation-toggle" onClick={() => setNavigationOpen(open => !open)} aria-expanded={navigationOpen} aria-controls="workspace-navigation"><Menu size={18} /><span>Меню</span></button>}<div className="breadcrumb"><span>Контакт-центр</span><ChevronRight size={13} /><strong>{title.title}</strong></div><div className="topbar-right"><ThemeToggle theme={theme} onToggle={toggleTheme} /><span className={`connection-status ${bootstrap.configured.database && bootstrap.configured.ai ? "" : "connection-warning"}`}><i />{bootstrap.configured.database && bootstrap.configured.ai ? "Система подключена" : "Требуется настройка"}</span><span className="topbar-divider" /><button className="icon-button" onClick={() => void refresh()} disabled={busy || refreshing} aria-label="Обновить данные" title="Обновить данные"><RefreshCw size={17} className={refreshing ? "spin" : ""} /></button><span className="topbar-product">VOICE ROUTER <span>01</span></span></div></header>
-      <main className={`main-content view-${view}`} id="main-content"><div className="page-heading"><div><div className="page-eyebrow"><span /> DIR ECHOES / VOICE OPERATIONS</div><h1>{title.title}</h1><p>{title.subtitle}</p></div><button className="button button-primary new-conversation" onClick={() => void newSession()} disabled={busy}>{loadingSession ? <Spinner /> : <Plus size={17} />}Новый разговор</button></div>
+      <main className={`main-content view-${view}`} id="main-content"><div className="page-heading"><div><div className="page-eyebrow"><span /> DIR ECHOES / VOICE OPERATIONS</div><h1>{title.title}</h1><p>{title.subtitle}</p></div>{bootstrap.viewer.role !== "supervisor" && <button className="button button-primary new-conversation" onClick={() => void newSession()} disabled={busy}>{loadingSession ? <Spinner /> : <Plus size={17} />}Новый разговор</button>}</div>
         <div className="stats-grid"><Stat label="Разговоров" value={bootstrap.stats.sessions} icon={<MessageSquare size={17} />} note="В вашем рабочем пространстве" /><Stat label="Обработано реплик" value={bootstrap.stats.turns} icon={<AudioLines size={17} />} note="С сохранённым результатом" /><Stat label="У оператора" value={bootstrap.stats.handoffs} icon={<Headphones size={17} />} note="Открытые обращения с контекстом" /><Stat label="Выбор маршрута" value={bootstrap.stats.turns ? duration(bootstrap.stats.medianRoutingMs) : "—"} icon={<GitBranch size={17} />} note="Медиана времени маршрутизации" /></div>
         {error && <div className="global-error"><ErrorNotice message={error} onDismiss={() => setError(null)} /></div>}
         {(!bootstrap.configured.ai || !bootstrap.configured.database) && <div className="configuration-notice"><ShieldCheck size={17} /><span>{!bootstrap.configured.database ? "Хранилище не подключено. Сохранение разговоров недоступно." : "AI-сервис не подключён. Обработка новых обращений пока недоступна."}</span></div>}
-        {view === "conversation" ? <div className={`conversation-layout immersive-layout ${traceOpen ? "trace-open" : ""}`}><section className="conversation-panel voice-focused" aria-label="Разговор"><div className="conversation-heading"><span className="conversation-heading-icon"><AudioLines size={21} /></span><div className="conversation-title"><h2>{currentSession?.title || "Новый разговор"}</h2><span>{currentSession ? <><i className={`state-dot state-${currentSession.state.status}`} />{sessionStatus(currentSession.state.status)}</> : <>Готовы к первому обращению</>}</span></div><button className="button button-secondary conversation-new" onClick={() => void newSession()} disabled={busy} title="Создать новый разговор"><Plus size={16} /><span>Новый разговор</span></button>{currentSession && <a href={`/api/sessions/${currentSession.id}/export`} download className="icon-button" aria-label="Скачать историю разговора в JSON" title="Скачать историю в JSON"><ArrowDownToLine size={18} /></a>}<button className="button button-secondary chat-toggle" onClick={() => setShowChat(open => !open)} aria-expanded={showChat} aria-controls="voice-chat"><MessageSquare size={16} />Чат</button><button ref={traceToggleRef} className="button button-secondary trace-toggle" onClick={() => { if (traceOpen || remindersOpen) { setTraceOpen(false); setRemindersOpen(false); } else setRemindersOpen(true); }} aria-expanded={traceOpen || remindersOpen} aria-controls={traceOpen ? "response-logic" : "conversation-details"}><GitBranch size={16} />Подсказки</button><button className={`icon-button ${autoSpeak ? "audio-enabled" : ""}`} onClick={() => { autoSpeakRef.current = !autoSpeakRef.current; setAutoSpeak(autoSpeakRef.current); if (!autoSpeakRef.current) stopVoiceCall(); }} aria-label={autoSpeak ? "Выключить автоматическое озвучивание" : "Включить автоматическое озвучивание"} aria-pressed={autoSpeak} title={autoSpeak ? "Автоматическое озвучивание включено" : "Автоматическое озвучивание выключено"}>{autoSpeak ? <Volume2 size={18} /> : <VolumeX size={18} />}</button></div>
-          <div className="voice-conversation-space"><div className="voice-stage" data-active={voiceCall.active || undefined}><VoiceParticles mode={particleMode} level={voiceCall.micLevel} replyLevel={playbackMeter.level} callActive={voiceCall.active} theme={theme} variant="stage" /><div className="voice-stage-copy"><strong role="status" aria-live="polite">{callLabel}</strong><span>{callHint}</span>{callControls}</div></div>
+        {view === "conversation" ? <div className={`conversation-layout immersive-layout ${traceOpen ? "trace-open" : ""}`}><section className="conversation-panel voice-focused" aria-label="Разговор"><div className="conversation-heading"><span className="conversation-heading-icon"><AudioLines size={21} /></span><div className="conversation-title"><h2>{currentSession?.title || "Новый разговор"}</h2><span>{currentSession ? <><i className={`state-dot state-${currentSession.state.status}`} />{sessionStatus(currentSession.state.status)}</> : <>Готовы к первому обращению</>}</span></div>{bootstrap.viewer.role !== "supervisor" && <button className="button button-secondary conversation-new" onClick={() => void newSession()} disabled={busy} title="Создать новый разговор"><Plus size={16} /><span>Новый разговор</span></button>}{currentSession && <a href={`/api/sessions/${currentSession.id}/export`} download className="icon-button" aria-label="Скачать историю разговора в JSON" title="Скачать историю в JSON"><ArrowDownToLine size={18} /></a>}<button className="button button-secondary chat-toggle" onClick={() => setShowChat(open => !open)} aria-expanded={showChat} aria-controls="voice-chat"><MessageSquare size={16} />Чат</button><button ref={traceToggleRef} className="button button-secondary trace-toggle" onClick={() => { if (traceOpen || remindersOpen) { setTraceOpen(false); setRemindersOpen(false); } else setRemindersOpen(true); }} aria-expanded={traceOpen || remindersOpen} aria-controls={traceOpen ? "response-logic" : "conversation-details"}><GitBranch size={16} />Подсказки</button><button className={`icon-button ${autoSpeak ? "audio-enabled" : ""}`} onClick={() => { autoSpeakRef.current = !autoSpeakRef.current; setAutoSpeak(autoSpeakRef.current); if (!autoSpeakRef.current) stopVoiceCall(); }} aria-label={autoSpeak ? "Выключить автоматическое озвучивание" : "Включить автоматическое озвучивание"} aria-pressed={autoSpeak} title={autoSpeak ? "Автоматическое озвучивание включено" : "Автоматическое озвучивание выключено"}>{autoSpeak ? <Volume2 size={18} /> : <VolumeX size={18} />}</button></div>
+          <div className="voice-conversation-space"><div className="voice-stage" data-active={voiceCall.active || undefined}><VoiceParticles mode={particleMode} level={voiceCall.micLevel} replyLevel={playbackMeter.level} callActive={voiceCall.active} theme={theme} variant="stage" /><div className="voice-stage-copy"><strong role="status" aria-live="polite">{bootstrap.viewer.role === "supervisor" ? "Просмотр разговора клиента" : callLabel}</strong><span>{bootstrap.viewer.role === "supervisor" ? "Перехват и живой голос доступны в Live · Диалоги" : callHint}</span>{bootstrap.viewer.role !== "supervisor" && callControls}</div></div>
           {showChat && <aside className="voice-chat-panel" id="voice-chat" aria-label="Чат и расшифровка"><div className="transcript-toolbar"><span>Расшифровка</span>{!!detail?.turns.length && <button onClick={() => setTranscriptExpanded(open => !open)}>{transcriptExpanded ? "Последняя реплика" : `Весь разговор · ${detail.turns.length}`}</button>}<button className="icon-button" onClick={() => setShowChat(false)} aria-label="Скрыть чат"><X size={17} /></button></div>
           <div className="conversation-body" aria-live="polite" aria-relevant="additions text">{loadingSession ? <div className="conversation-loading"><Spinner label="Открываем разговор…" /></div> : (!detail || !detail.turns.length) ? <div className="conversation-empty"><MessageSquare size={22} /><h3>Здесь — ваш разговор</h3><p>Речь и ответы появятся автоматически. Можно также написать сообщение.</p></div> : <ConversationThread detail={detail} turns={visibleTurns} viewerRole={bootstrap.viewer.role} selectedTurnId={selectedTurnId} playingTurnId={playingTurnId} audioLoadingId={audioLoadingId} busy={busy} voiceCallActive={voiceCall.active} onAudio={turn => {
             if (playingTurnId === turn.id || audioLoadingId === turn.id) stopAudio();
@@ -513,7 +527,8 @@ export function VoiceWorkspace() {
           {phase && <div className="processing-message" role="status"><span className="assistant-avatar"><AudioLines size={17} /></span><Spinner label={phaseLabel} /></div>}<div ref={messageEndRef} /></div>
           {currentSession?.state.pendingConfirmation && <div className="conversation-confirmation"><ShieldCheck size={17} /><span>Перед выполнением операции нужно ваше подтверждение.</span></div>}
           {currentSession?.state.status === "handoff" && <div className="conversation-handoff"><Headphones size={17} /><span>Обращение передано оператору вместе с контекстом.</span><button onClick={() => void refresh()} disabled={busy || refreshing}>Проверить ответ</button></div>}
-          <div className="composer">
+          {bootstrap.viewer.role === "participant" && currentSession?.state.status === "handoff" && <div style={{ pointerEvents: "auto", padding: "12px 0", flexShrink: 0 }}><OperatorVoiceControls sessionId={currentSession.id} role="participant" enabled={detail?.handoffs?.some(handoff => handoff.status === "active") ?? false} /></div>}
+          {bootstrap.viewer.role === "participant" && <div className="composer">
             <div className="conversation-tools"><span>Говорите на удобном вам языке</span>{voiceCall.active && <button className="text-input-toggle" onClick={() => { stopVoiceCall(); requestAnimationFrame(() => textareaRef.current?.focus()); }}>Перейти к тексту</button>}</div>
             <form className="text-composer" onSubmit={event => { event.preventDefault(); if (!busy && !voiceCall.active) sendTextMessage(); }}>
               <label className="visually-hidden" htmlFor="message-input">{currentSession?.state.status === "handoff" ? "Сообщение оператору" : "Текст обращения"}</label>
@@ -521,9 +536,9 @@ export function VoiceWorkspace() {
               <button className="send-button" type="submit" aria-label={currentSession?.state.status === "handoff" ? "Отправить сообщение оператору" : "Отправить обращение"} title="Отправить · Enter" disabled={busy || voiceCall.active || !draft.trim() || !canSendText}><ArrowRight size={20} /></button>
             </form>
             <div className="composer-footnote"><span><LockKeyhole size={12} />История сохраняется автоматически</span><span>Используйте данные кейса без реальных персональных данных</span></div>
-          </div>
+          </div>}
           </aside>}</div>
-        </section>{traceOpen && <aside className="trace-drawer" id="response-logic" aria-label="Логика ответа"><header><strong>Логика ответа</strong><button className="icon-button" onClick={() => { setTraceOpen(false); setRemindersOpen(false); traceToggleRef.current?.focus(); }} aria-label="Скрыть логику ответа"><X size={18} /></button></header><TracePanel detail={detail} catalog={bootstrap.catalog} selectedTurnId={selectedTurnId} onSelectTurn={setSelectedTurnId} isSupervisor={bootstrap.viewer.role === "supervisor"} /></aside>}{!traceOpen && remindersOpen && <ConversationContext detail={detail} catalog={bootstrap.catalog} busy={busy} onClose={() => { setRemindersOpen(false); traceToggleRef.current?.focus(); }} onTrace={() => setTraceOpen(true)} onResumeTopic={text => { stopVoiceCall(); useExample(text); }} />}</div> : view === "history" ? <HistoryView sessions={bootstrap.sessions} onOpen={id => void openSession(id)} onNew={() => void newSession()} currentId={currentSession?.id} /> : view === "catalog" ? <CatalogView catalog={bootstrap.catalog} onExample={useExample} canEdit={bootstrap.viewer.role === "supervisor"} catalogHash={bootstrap.datasetHash} onCatalogChanged={refreshBootstrap} /> : view === "supervision" && bootstrap.viewer.role === "supervisor" ? <SupervisorDashboard catalog={bootstrap.catalog} onOpen={(id, turnId) => void openSession(id, turnId)} /> : <OperatorsView handoffs={bootstrap.handoffs} onChanged={refreshBootstrap} onOpen={id => void openSession(id)} drafts={operatorDraftsRef.current} requests={operatorRequestsRef.current} onBusyChange={setOperatorBusy} />}
+        </section>{traceOpen && <aside className="trace-drawer" id="response-logic" aria-label="Логика ответа"><header><strong>Логика ответа</strong><button className="icon-button" onClick={() => { setTraceOpen(false); setRemindersOpen(false); traceToggleRef.current?.focus(); }} aria-label="Скрыть логику ответа"><X size={18} /></button></header><TracePanel detail={detail} catalog={bootstrap.catalog} selectedTurnId={selectedTurnId} onSelectTurn={setSelectedTurnId} isSupervisor={bootstrap.viewer.role === "supervisor"} /></aside>}{!traceOpen && remindersOpen && <ConversationContext detail={detail} catalog={bootstrap.catalog} busy={busy} onClose={() => { setRemindersOpen(false); traceToggleRef.current?.focus(); }} onTrace={() => setTraceOpen(true)} onResumeTopic={text => { stopVoiceCall(); useExample(text); }} />}</div> : view === "history" ? <HistoryView sessions={bootstrap.sessions} onOpen={id => void openSession(id)} onNew={bootstrap.viewer.role === "supervisor" ? undefined : () => void newSession()} currentId={currentSession?.id} /> : view === "catalog" ? <CatalogView catalog={bootstrap.catalog} onExample={useExample} canEdit={bootstrap.viewer.role === "supervisor"} catalogHash={bootstrap.datasetHash} onCatalogChanged={refreshBootstrap} /> : view === "supervision" && bootstrap.viewer.role === "supervisor" ? <SupervisorDashboard catalog={bootstrap.catalog} onOpen={(id, turnId) => void openSession(id, turnId)} /> : <OperatorsView sessions={bootstrap.sessions} catalog={bootstrap.catalog} handoffs={bootstrap.handoffs} onChanged={refreshBootstrap} onOpen={id => void openSession(id)} drafts={operatorDraftsRef.current} requests={operatorRequestsRef.current} onBusyChange={setOperatorBusy} />}
         <footer className="page-footer"><span>DIR ECHOES <span>Гибридный голосовой маршрутизатор</span></span><span>Данные кейса на {bootstrap.businessDate} <span className="footer-dot">·</span> Каталог {bootstrap.datasetHash.slice(0, 8)}</span></footer>
       </main>
     </div>
@@ -553,5 +568,5 @@ function Login({ onSuccess, initialError, theme, onToggleTheme }: { onSuccess: (
     setBusy(true); setError(null);
     try { await api("/api/auth", { method: "POST", body: JSON.stringify({ code: code.trim(), role }) }); setCode(""); await onSuccess(); } catch (err) { setError(readableError(err)); } finally { setBusy(false); }
   }
-  return <main className="login-page"><ThemeToggle theme={theme} onToggle={onToggleTheme} className="login-theme-toggle" /><section className="login-story"><div className="login-story-main"><span className="login-eyebrow"><span />VOICE OPERATIONS PLATFORM</span><h1>Слышать запрос.<br />Понимать контекст.<br /><span>Находить решение.</span></h1><p>Гибридный голосовой маршрутизатор.<br />Говорите на удобном вам языке.</p><div className="login-flow"><span><Mic size={19} />Голос</span><i /><span><GitBranch size={19} />Сценарий</span><i /><span><Check size={19} />Действие</span></div></div><div className="login-story-footer"><span>DIR ECHOES</span><span>VOICE ROUTER / 01</span></div></section><section className="login-form-side"><div className="login-card"><Logo size={64} /><span className="section-eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span><h2>Добро пожаловать</h2><p>Войдите, чтобы начать разговор<br />и работать с обращениями.</p><form onSubmit={submit}><fieldset className="login-role"><legend>Роль</legend><button type="button" className={role === "participant" ? "selected" : ""} onClick={() => setRole("participant")} disabled={busy}><MessageSquare size={16} />Участник</button><button type="button" className={role === "supervisor" ? "selected" : ""} onClick={() => setRole("supervisor")} disabled={busy}><Headphones size={16} />Супервизор</button></fieldset><label htmlFor="access-code">Код доступа</label><div className="login-code"><LockKeyhole size={17} /><input id="access-code" type="password" autoComplete="current-password" placeholder="Введите выданный код" value={code} onChange={e => setCode(e.target.value)} disabled={busy} required maxLength={200} /></div>{error && <ErrorNotice message={error} onDismiss={() => setError(null)} />}<button className="button button-primary login-submit" type="submit" disabled={!code.trim() || busy}>{busy ? <Spinner label="Подключаемся…" /> : <>Войти в рабочее пространство<ArrowRight size={17} /></>}</button></form><div className="login-privacy"><ShieldCheck size={17} /><span>Доступ по коду. История разговоров<br />сохраняется в вашем пространстве.<br />Используйте данные кейса. Не вводите и не произносите реальные персональные данные.</span></div></div><div className="login-bottom">DIR ECHOES <span>Говорите на удобном вам языке</span></div></section></main>;
+  return <main className="login-page"><ThemeToggle theme={theme} onToggle={onToggleTheme} className="login-theme-toggle" /><section className="login-story"><div className="login-story-main"><span className="login-eyebrow"><span />VOICE OPERATIONS PLATFORM</span><h1>Слышать запрос.<br />Понимать контекст.<br /><span>Находить решение.</span></h1><p>Гибридный голосовой маршрутизатор.<br />Говорите на удобном вам языке.</p><div className="login-flow"><span><Mic size={19} />Голос</span><i /><span><GitBranch size={19} />Сценарий</span><i /><span><Check size={19} />Действие</span></div></div><div className="login-story-footer"><span>DIR ECHOES</span><span>VOICE ROUTER / 01</span></div></section><section className="login-form-side"><div className="login-card"><Logo size={64} /><span className="section-eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span><h2>{role === "supervisor" ? "Рабочее место супервизора" : "Разговор с ассистентом"}</h2><p>{role === "supervisor" ? "Все диалоги, контроль AI и подключение к клиенту своим голосом." : "Задайте вопрос голосом или текстом. При необходимости подключится человек."}</p><form onSubmit={submit}><fieldset className="login-role"><legend>Выберите, как войти</legend><button type="button" className={role === "participant" ? "selected" : ""} aria-pressed={role === "participant"} onClick={() => setRole("participant")} disabled={busy}><MessageSquare size={16} />Клиент</button><button type="button" className={role === "supervisor" ? "selected" : ""} aria-pressed={role === "supervisor"} onClick={() => setRole("supervisor")} disabled={busy}><Headphones size={16} />Супервизор</button></fieldset><label htmlFor="access-code">Код доступа</label><div className="login-code"><LockKeyhole size={17} /><input id="access-code" type="password" autoComplete="current-password" placeholder="Введите выданный код" value={code} onChange={e => setCode(e.target.value)} disabled={busy} required maxLength={200} /></div>{error && <ErrorNotice message={error} onDismiss={() => setError(null)} />}<button className="button button-primary login-submit" type="submit" disabled={!code.trim() || busy}>{busy ? <Spinner label="Подключаемся…" /> : <>Войти в рабочее пространство<ArrowRight size={17} /></>}</button></form><div className="login-privacy"><ShieldCheck size={17} /><span>Доступ по коду. История разговоров<br />сохраняется в вашем пространстве.<br />Используйте данные кейса. Не вводите и не произносите реальные персональные данные.</span></div></div><div className="login-bottom">DIR ECHOES <span>Говорите на удобном вам языке</span></div></section></main>;
 }

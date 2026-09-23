@@ -1,7 +1,53 @@
 import { normalizeSlot } from "./domain-data";
 import { effectiveSlots } from "./routing-slots";
 import { languageFromList, languagePhrase, spokenLanguages, stateLanguages } from "./languages";
-import type { Dataset, DialogueState, Json, Language, RouterOutput, SlotDefinition, SpokenLanguage } from "./types";
+import type { Dataset, DialogueState, Json, Language, ReviewedLanguage, RouterOutput, SlotDefinition, SpokenLanguage } from "./types";
+
+// Conversation management only. A greeting plus any other words is a miss, so
+// meaningful requests still reach the LLM instead of losing their business intent.
+const socialPhrases: Record<ReviewedLanguage, readonly string[]> = {
+  ru: ["привет", "здравствуйте", "добрый день", "добрый вечер", "доброе утро", "алло", "вы меня слышите", "ты меня слышишь"],
+  kk: ["сәлем", "сәлеметсіз бе", "қайырлы күн", "қайырлы таң", "қайырлы кеш", "естіп тұрсыз ба"],
+  tr: ["merhaba", "selam", "günaydın", "iyi günler", "iyi akşamlar", "beni duyuyor musunuz"],
+};
+function wholePhrase(value: string): string {
+  return value.normalize("NFC").trim().toLowerCase().replace(/[.!?…]+$/u, "").trim().replace(/\s+/gu, " ");
+}
+const socialIndex = new Map<string, ReviewedLanguage>(Object.entries(socialPhrases).flatMap(([language, phrases]) => phrases.map(phrase => [wholePhrase(phrase), language as ReviewedLanguage] as const)));
+type CatalogExample = { scenarioId: string; language: "ru" | "kk" };
+let catalogExamples: { hash: string; index: Map<string, CatalogExample | null> } | undefined;
+function catalogExampleIndex(dataset: Dataset): Map<string, CatalogExample | null> {
+  if (catalogExamples?.hash === dataset.hash) return catalogExamples.index;
+  const index = new Map<string, CatalogExample | null>();
+  // Compare against the entire catalog: any duplicate full example is ambiguous,
+  // including a collision with a non-eligible scenario or another language.
+  for (const scenario of dataset.scenarios) for (const language of ["ru", "kk"] as const) for (const example of scenario.examples[language]) {
+    const key = wholePhrase(example);
+    index.set(key, index.has(key) ? null : { scenarioId: scenario.scenario_id, language });
+  }
+  catalogExamples = { hash: dataset.hash, index };
+  return index;
+}
+
+function initialFastPath(dataset: Dataset, state: DialogueState, text: string, started: number): RouterOutput | null {
+  if (state.activeScenarioId || state.pendingConfirmation || !text || text.length > 180 || /[\d@\r\n]/u.test(text)) return null;
+  const phrase = wholePhrase(text);
+  const socialLanguage = socialIndex.get(phrase);
+  if (socialLanguage && dataset.systemIntents.some(intent => intent.id === "SYS_UNCLEAR")) {
+    const reason = languagePhrase([socialLanguage], { ru: "Точная короткая фраза приветствия без делового запроса.", kk: "Іскерлік сұраныссыз нақты қысқа сәлемдесу.", tr: "İş talebi içermeyen tam ve kısa bir selamlama." });
+    return { decision: { scenarios: [{ scenarioId: "SYS_UNCLEAR", confidence: 1, reason }], alternatives: [], utteranceKind: "greeting", language: socialLanguage, inputLanguages: [socialLanguage], responseLanguage: socialLanguage, responseLanguages: [socialLanguage], tone: "neutral", slots: {}, isContinuation: false, confirmation: "none", reason, clarification: null }, source: "social", model: "social-fast-path", elapsedMs: Number((performance.now() - started).toFixed(3)), inputTokens: 0, outputTokens: 0, estimatedUsd: 0 };
+  }
+  // SC37 is the only allowed business target: its full examples carry no slots,
+  // ask for a human explicitly and require no customer identification. Examples
+  // are read from the versioned catalog, never duplicated as phrase routing rules.
+  if (state.clientId || state.lastQuestionSlot || state.pendingScenarioIds.length || state.suspendedScenarioIds.length || state.completedScenarioIds.length || Object.keys(state.slots).length || Object.keys(state.slotsByScenario).length) return null;
+  const match = catalogExampleIndex(dataset).get(phrase);
+  if (!match || match.scenarioId !== "SC37") return null;
+  const scenario = dataset.scenarios.find(candidate => candidate.scenario_id === match.scenarioId);
+  if (!scenario?.fast_path_eligible || scenario.requires_identification || scenario.requires_confirmation || scenario.slots.required.length || scenario.actions.length !== 1 || scenario.actions[0] !== "transfer_to_operator") return null;
+  const reason = languagePhrase([match.language], { ru: "Полная фраза точно совпадает с единственным примером запроса оператора в каталоге.", kk: "Толық сөйлем каталогтағы оператор сұрауының бір ғана мысалына дәл сәйкес келеді.", tr: "Tam ifade katalogdaki tek bir operatör talebi örneğiyle eşleşiyor." });
+  return { decision: { scenarios: [{ scenarioId: scenario.scenario_id, confidence: 1, reason }], alternatives: [], utteranceKind: "request", language: match.language, inputLanguages: [match.language], responseLanguage: match.language, responseLanguages: [match.language], tone: "neutral", slots: {}, isContinuation: false, confirmation: "none", reason, clarification: null }, source: "catalog_example", model: "catalog-example-fast-path", elapsedMs: Number((performance.now() - started).toFixed(3)), inputTokens: 0, outputTokens: 0, estimatedUsd: 0 };
+}
 
 // Complete slot labels, never utterance-to-scenario rules. All targets must also
 // exist in the current catalog's values before this path can accept them.
@@ -90,12 +136,13 @@ function atomicValue(def: SlotDefinition, text: string, businessDate: string): J
   try { return normalizeSlot(def, candidate, businessDate); } catch { return undefined; }
 }
 
-/** Continue an already selected scenario. This function never selects a new intent. */
+/** Exact social/catalog entry points, then atomic continuation of a selected scenario. */
 export function tryFastPath({ dataset, state, text, responseLanguage = state.language, responseLanguages }: {
   dataset: Dataset; state: DialogueState; text: string; responseLanguage?: Language; responseLanguages?: SpokenLanguage[];
 }): RouterOutput | null {
   const started = performance.now();
-  if (state.status !== "active" || !state.activeScenarioId) return null;
+  if (state.status !== "active") return null;
+  if (!state.activeScenarioId) return initialFastPath(dataset, state, text, started);
   const scenario = dataset.scenarios.find(item => item.scenario_id === state.activeScenarioId);
   if (!scenario) return null;
   const value = text.trim();

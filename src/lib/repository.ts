@@ -25,9 +25,12 @@ export async function getSessionDetail(id: string, viewer: Viewer): Promise<Sess
   const row = await sessionRow(id,viewer);
   // Recover a durable action/fallback if a server process stopped during wording.
   if(!row.busy_until || new Date(row.busy_until).getTime()<=Date.now()) await query("UPDATE turns SET status='completed' WHERE session_id=$1 AND status='finalizing' AND EXISTS (SELECT 1 FROM sessions WHERE id=$1 AND (busy_until IS NULL OR busy_until<=now()))",[id]);
-  const result = await query<TurnRow>("SELECT * FROM turns WHERE session_id=$1 AND status='completed' ORDER BY created_at,id",[id]);
+  const [result,handoffs] = await Promise.all([
+    query<TurnRow>("SELECT * FROM turns WHERE session_id=$1 AND status='completed' ORDER BY created_at,id",[id]),
+    query<HandoffRow>("SELECT * FROM handoffs WHERE session_id=$1 ORDER BY created_at DESC",[id])
+  ]);
   const turns: Turn[] = result.rows.map(t => ({ id:t.id,sessionId:t.session_id,requestId:t.request_id,userText:t.user_text,assistantText:t.assistant_text,trace:t.trace,mode:t.mode,createdAt:iso(t.created_at) }));
-  return {session:{...asSession(row),turnCount:turns.length},turns};
+  return {session:{...asSession(row),turnCount:turns.length},turns,handoffs:handoffs.rows.map(asHandoff)};
 }
 export async function listHandoffs(viewer: Viewer) {
   if (viewer.role !== "supervisor") return [];
@@ -53,6 +56,6 @@ export async function stats(viewer: Viewer) {
     (SELECT count(*) FROM sessions WHERE $1='supervisor' OR owner_id=$2) AS sessions,
     (SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE t.status='completed' AND ($1='supervisor' OR s.owner_id=$2)) AS turns,
     (SELECT count(*) FROM handoffs h JOIN sessions s ON s.id=h.session_id WHERE h.status<>'closed' AND ($1='supervisor' OR s.owner_id=$2)) AS handoffs,
-    (SELECT percentile_cont(0.5) WITHIN GROUP(ORDER BY (t.trace->'timings'->>'router')::double precision) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE t.status='completed' AND t.trace->>'source' IN ('llm','slot','confirmation') AND ($1='supervisor' OR s.owner_id=$2)) AS median`,[viewer.role,viewer.id]);
+    (SELECT percentile_cont(0.5) WITHIN GROUP(ORDER BY (t.trace->'timings'->>'router')::double precision) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE t.status='completed' AND t.trace->>'source' IN ('llm','slot','confirmation','catalog_example','social') AND ($1='supervisor' OR s.owner_id=$2)) AS median`,[viewer.role,viewer.id]);
   const row=result.rows[0]; return {sessions:Number(row.sessions),turns:Number(row.turns),handoffs:Number(row.handoffs),medianRoutingMs:row.median==null?null:Math.round(Number(row.median))};
 }

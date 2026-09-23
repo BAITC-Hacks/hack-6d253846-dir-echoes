@@ -54,11 +54,11 @@ export type Trace = {
   inputLanguages?: SpokenLanguage[]; responseLanguages?: SpokenLanguage[];
   timings: Timings; catalogHash: string; model: string;
   usage: { inputTokens: number; outputTokens: number; estimatedUsd: number };
-  source: "llm" | "confirmation" | "slot" | "operator"; warnings: string[];
+  source: "llm" | "confirmation" | "slot" | "catalog_example" | "social" | "operator"; warnings: string[];
 };
 export type Turn = { id: string; sessionId: string; requestId: string; userText: string; assistantText: string; createdAt: string; trace: Trace; mode: "text" | "voice" | "operator" };
 export type Session = { id: string; title: string; createdAt: string; updatedAt: string; state: DialogueState; version: number; turnCount: number };
-export type SessionDetail = { session: Session; turns: Turn[] };
+export type SessionDetail = { session: Session; turns: Turn[]; handoffs?: Handoff[] };
 export type Handoff = { id: string; sessionId: string; queue: string; reason: string; summary: string; status: "waiting" | "active" | "closed"; createdAt: string; updatedAt: string };
 export type ChatEntry = { role: "user" | "assistant"; content: string };
 export interface EntityStore {
@@ -68,4 +68,4 @@ export interface EntityStore {
 }
 export type ExecuteInput = { dataset: Dataset; state: DialogueState; decision: RoutingDecision; text: string; store: EntityStore; sessionId: string; requestId: string };
 export type ExecuteOutput = { state: DialogueState; actions: ActionResult[]; reply: string; facts: JsonObject; handoff?: { queue: string; reason: string }; warnings: string[] };
-export type RouterOutput = { decision: RoutingDecision; model: string; source?: "llm" | "confirmation" | "slot"; elapsedMs: number; inputTokens: number; outputTokens: number; estimatedUsd: number };
+export type RouterOutput = { decision: RoutingDecision; model: string; source?: "llm" | "confirmation" | "slot" | "catalog_example" | "social"; elapsedMs: number; inputTokens: number; outputTokens: number; estimatedUsd: number };

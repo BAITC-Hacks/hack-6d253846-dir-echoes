@@ -11,8 +11,8 @@ import { recordErrorEvent, type ErrorStage } from "./error-events";
 
 export async function processTurn(sessionId: string, viewer: Viewer, input: {text:string;requestId:string;mode:"text"|"voice";sttMs?:number}) {
   const started=performance.now();
-  const dataset=await getDataset();
-  let prior=await getSessionDetail(sessionId,viewer);
+  const [dataset,initialDetail]=await Promise.all([getDataset(),getSessionDetail(sessionId,viewer)]);
+  let prior=initialDetail;
   if (!await consumeLimit(`turn:${viewer.id}`,30,300)) throw new ApiError(429,"Слишком много запросов. Подождите немного.");
   const turnId=randomUUID();
   const replay=await transaction(async sql=>{
@@ -80,12 +80,15 @@ export async function processTurn(sessionId: string, viewer: Viewer, input: {tex
       } catch(error) { await recordErrorEvent({stage:"reply",error,sessionId,turnId}); trace!.warnings.push("Формулировка ответа не улучшена из-за ошибки API; показан сохранённый ответ исполнителя."); }
     }
     trace!.timings.serverTotal=Math.round(performance.now()-started);
-    await query("UPDATE turns SET assistant_text=$2,trace=$3::jsonb,status='completed' WHERE id=$1",[turnId,reply,JSON.stringify(trace!)]);
+    // Takeover may have completed this turn with its durable fallback meanwhile.
+    await query("UPDATE turns SET assistant_text=$2,trace=$3::jsonb,status='completed' WHERE id=$1 AND status='finalizing'",[turnId,reply,JSON.stringify(trace!)]);
     return await getSessionDetail(sessionId,viewer);
   } catch(error) {
+    if(committed) { await recordErrorEvent({stage,error,sessionId,turnId}); await query("UPDATE turns SET status='completed' WHERE id=$1 AND status='finalizing'",[turnId]); return await getSessionDetail(sessionId,viewer); }
+    const failed=await query("UPDATE turns SET status='failed' WHERE id=$1 AND status='processing'",[turnId]);
+    // A takeover retained this input as an operator-owned turn; return that result.
+    if(!failed.rowCount) return await getSessionDetail(sessionId,viewer);
     await recordErrorEvent({stage,error,sessionId,turnId});
-    if(committed) { await query("UPDATE turns SET status='completed' WHERE id=$1 AND status='finalizing'",[turnId]); return await getSessionDetail(sessionId,viewer); }
-    await query("UPDATE turns SET status='failed' WHERE id=$1",[turnId]);
     throw error;
   } finally { await query("UPDATE sessions SET busy_until=NULL,busy_token=NULL WHERE id=$1 AND busy_token=$2",[sessionId,turnId]); }
 }

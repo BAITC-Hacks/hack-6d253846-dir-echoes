@@ -47,7 +47,7 @@ interface Runtime {
 
 const IDLE: Snapshot = { status: "idle", micLevel: 0, elapsedMs: 0 };
 const PRE_ROLL_MS = 500;
-const SILENCE_MS = 950;
+const SILENCE_MS = 650;
 const ECHO_GUARD_MS = 250;
 const CALIBRATION_MS = 320;
 const ECHO_TAIL_MS = 80;
