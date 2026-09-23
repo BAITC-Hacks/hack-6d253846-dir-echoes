@@ -28,10 +28,10 @@ export async function processTurn(sessionId: string, viewer: Viewer, input: {tex
     return false;
   });
   if(replay) return getSessionDetail(sessionId,viewer);
-  prior=await getSessionDetail(sessionId,viewer);
-  const history:ChatEntry[]=prior.turns.slice(-10).flatMap(turn=>[{role:"user" as const,content:turn.userText},{role:"assistant" as const,content:turn.assistantText}]);
   let committed=false;
   try {
+    prior=await getSessionDetail(sessionId,viewer);
+    const history:ChatEntry[]=prior.turns.slice(-10).flatMap(turn=>[{role:"user" as const,content:turn.userText},{role:"assistant" as const,content:turn.assistantText}]);
     if(prior.session.state.status==="handoff") {
       const trace:Trace={scenarios:[],alternatives:[],reason:"Сообщение клиента сохранено в обращении для оператора",language:prior.session.state.language,slots:{},actions:[],timings:{stt:input.sttMs??null,router:0,executor:0,response:0,serverTotal:Math.round(performance.now()-started)},catalogHash:dataset.hash,model:"operator_queue",usage:{inputTokens:0,outputTokens:0,estimatedUsd:0},source:"operator",warnings:[]};
       await transaction(async sql=>{

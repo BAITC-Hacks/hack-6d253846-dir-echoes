@@ -2,15 +2,15 @@ import { randomUUID, createHash } from "node:crypto";
 import { z } from "zod";
 import { ApiError, checkOrigin, errorResponse, requireViewer, signIn, signOut, viewer } from "@/lib/auth";
 import { getDataset } from "@/lib/dataset";
-import { consumeLimit, query, transaction } from "@/lib/db";
+import { consumeLimit, query } from "@/lib/db";
 import { initialState } from "@/lib/domain";
 import { processTurn } from "@/lib/conversation";
 import { transcribeAudio, synthesizeSpeech } from "@/lib/ai";
 import { getBudgetStatus } from "@/lib/budget";
 import { streamAndCacheAudio } from "@/lib/speech-stream";
 import { getSupervision, saveReview, saveCatalogRevision, catalogPatchSchema } from "@/lib/supervision";
-import { asHandoff, getSessionDetail, listHandoffs, listSessions, redact, sessionRow, stats } from "@/lib/repository";
-import type { Trace } from "@/lib/types";
+import { getSessionDetail, listHandoffs, listSessions, redact, sessionRow, stats } from "@/lib/repository";
+import { updateHandoff } from "@/lib/handoffs";
 
 export const runtime="nodejs";
 export const maxDuration=60;
@@ -103,7 +103,7 @@ async function handle(request:Request,context:Context):Promise<Response>{
     // text, voice, model, language and tone all participate in the content key.
     const readCached=()=>query<{data:Buffer;mime:string;first_byte_ms:number}>("SELECT data,mime,first_byte_ms FROM speech_audio WHERE text_hash=$1 LIMIT 1",[textHash]);
     const audioResponse=async(cached:{data:Buffer;mime:string;first_byte_ms:number})=>{
-      await query("UPDATE turns SET trace=jsonb_set(trace,'{timings}',(trace->'timings') || $2::jsonb) WHERE id=$1 AND NOT (trace->'timings' ? 'ttsFirstByte')",[turn.id,JSON.stringify({ttsFirstByte:0,ttsCacheHit:true})]);
+      await query("UPDATE turns SET trace=jsonb_set(trace,'{timings}',(trace->'timings') || CASE WHEN trace->'timings' ? 'ttsFirstByte' THEN '{}'::jsonb ELSE '{\"ttsFirstByte\":0,\"ttsCacheHit\":true}'::jsonb END || '{\"lastPlaybackCached\":true}'::jsonb) WHERE id=$1",[turn.id]);
       return new Response(new Uint8Array(cached.data),{headers:{...noStore,"Content-Type":cached.mime,"X-TTS-First-Byte-Ms":"0","X-Audio-Cached":"true","X-Audio-Delivery":"cached"}});
     };
     const cached=await readCached(); if(cached.rows[0]) return audioResponse(cached.rows[0]);
@@ -120,7 +120,7 @@ async function handle(request:Request,context:Context):Promise<Response>{
       const mime=speech.response.headers.get("content-type")||"audio/mpeg";
       if(!speech.response.body) throw new ApiError(502,"Аудиосервис не вернул поток ответа.");
       source=speech.response.body;
-      await query("UPDATE turns SET trace=jsonb_set(trace,'{timings}',(trace->'timings') || $2::jsonb) WHERE id=$1",[turn.id,JSON.stringify({ttsFirstByte:Math.round(speech.firstByteMs)})]);
+      await query("UPDATE turns SET trace=jsonb_set(trace,'{timings}',(trace->'timings') || CASE WHEN trace->'timings' ? 'ttsFirstByte' THEN '{}'::jsonb ELSE $2::jsonb END || '{\"lastPlaybackCached\":false}'::jsonb) WHERE id=$1",[turn.id,JSON.stringify({ttsFirstByte:Math.round(speech.firstByteMs),ttsCacheHit:false})]);
       const audioStream=streamAndCacheAudio({source:speech.response.body,release,save:async bytes=>{
         await query("INSERT INTO speech_audio(turn_id,text_hash,data,mime,first_byte_ms) VALUES($1,$2,$3,$4,$5) ON CONFLICT(turn_id) DO UPDATE SET text_hash=EXCLUDED.text_hash,data=EXCLUDED.data,mime=EXCLUDED.mime,first_byte_ms=EXCLUDED.first_byte_ms",[turn.id,textHash,Buffer.from(bytes),mime,Math.round(speech.firstByteMs)]);
       }});
@@ -130,29 +130,9 @@ async function handle(request:Request,context:Context):Promise<Response>{
   }
   if(path[0]==="handoffs" && path[1] && method==="PATCH"){
     await requireViewer("supervisor");
-    const data=await body(request,z.object({status:z.enum(["active","closed"]),message:z.string().trim().max(2000).optional()}));
-    const handoff=await transaction(async sql=>{
-      const reference=await sql.query<{session_id:string}>("SELECT session_id FROM handoffs WHERE id=$1",[path[1]]);
-      if(!reference.rows[0]) throw new ApiError(404,"Обращение не найдено.");
-      const sessionId=reference.rows[0].session_id;
-      // All queue mutations lock session before handoff, matching conversation processing.
-      const session=await sessionRow(sessionId,user,sql,true);
-      const record=await sql.query<Record<string,unknown>>("SELECT * FROM handoffs WHERE id=$1 FOR UPDATE",[path[1]]);
-      if(!record.rows[0]) throw new ApiError(404,"Обращение не найдено.");
-      const row=record.rows[0];
-      if(row.status==="closed") throw new ApiError(409,"Обращение уже закрыто.");
-      if(data.status==="closed") await sql.query("UPDATE sessions SET state=jsonb_set(state,'{status}','\"closed\"'::jsonb),version=version+1,updated_at=now() WHERE id=$1",[sessionId]);
-      const changed=row.status!==data.status;
-      const statusMessage=session.state.language==="kk"?(data.status==="closed"?"Оператор өтінішті аяқтады.":"Оператор өтінішті қабылдады."):(data.status==="closed"?"Оператор завершил обращение.":"Оператор принял обращение в работу.");
-      const message=[changed?statusMessage:"",data.message||""].filter(Boolean).join("\n\n");
-      if(message){
-        const trace:Trace={scenarios:[],alternatives:[],reason:changed?"Изменение статуса обращения оператором":"Ответ оператора",language:session.state.language,slots:{handoffId:path[1],status:data.status},actions:[],timings:{stt:null,router:0,executor:0,response:0,serverTotal:0},catalogHash:"",model:"human",usage:{inputTokens:0,outputTokens:0,estimatedUsd:0},source:"operator",warnings:[]};
-        await sql.query("INSERT INTO turns(id,session_id,request_id,user_text,assistant_text,mode,trace,status) VALUES($1,$2,$3,'',$4,'operator',$5::jsonb,'completed')",[randomUUID(),sessionId,randomUUID(),message,JSON.stringify(trace)]);
-        await sql.query("UPDATE sessions SET updated_at=now() WHERE id=$1",[sessionId]);
-      }
-      const updated=await sql.query("UPDATE handoffs SET status=$2,updated_at=now() WHERE id=$1 RETURNING *",[path[1],data.status]);
-      return asHandoff(updated.rows[0] as Parameters<typeof asHandoff>[0]);
-    });return json({handoff:redact(handoff)});
+    const data=await body(request,z.object({status:z.enum(["active","closed"]),message:z.string().trim().max(2000).optional(),requestId:z.string().min(8).max(100)}));
+    const handoff=await updateHandoff(path[1],user,data);
+    return json({handoff:redact(handoff)});
   }
   throw new ApiError(404,"Маршрут не найден.");
 }

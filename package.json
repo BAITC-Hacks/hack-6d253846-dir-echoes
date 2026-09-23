@@ -6,6 +6,7 @@
     "dev": "next dev --hostname 127.0.0.1 --port 13300",
     "build": "next build",
     "start": "next start --hostname 0.0.0.0",
+    "launch": "tsx --env-file-if-exists=.env.local scripts/launch.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --env-file-if-exists=.env.local --test tests/*.test.ts",
     "db:import": "tsx --env-file=.env.local scripts/import-dataset.ts",

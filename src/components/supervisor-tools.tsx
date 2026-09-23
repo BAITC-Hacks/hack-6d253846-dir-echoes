@@ -61,12 +61,14 @@ export function TurnReviewEditor({ turn, catalog }: { turn: Turn; catalog: Scena
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<Review | null>(null);
+  const submittingRef = useRef(false);
   useEffect(() => { setExpected(""); setNote(""); setError(null); setSaved(null); }, [turn.id]);
   async function submit(event: React.FormEvent) {
-    event.preventDefault(); if (busy || !expected) return;
+    event.preventDefault(); if (submittingRef.current || !expected) return;
+    submittingRef.current = true;
     setBusy(true); setError(null); setSaved(null);
     try { const result = await api<{ review: Review }>("/api/reviews", { method: "POST", body: JSON.stringify({ turnId: turn.id, expectedScenario: expected, note }) }); setSaved(result.review); }
-    catch (err) { setError(readableError(err)); } finally { setBusy(false); }
+    catch (err) { setError(readableError(err)); } finally { submittingRef.current = false; setBusy(false); }
   }
   if (turn.trace.source !== "llm" || !turn.trace.scenarios.length) return null;
   return <section className={`trace-section ${styles.reviewEditor}`}><div className="trace-section-heading"><ClipboardCheck size={15} /><h3>Оценка супервизора</h3></div><p className={styles.hint}>Какой сценарий должен быть основным? Повторная отправка заменит вашу оценку этой реплики.</p><form onSubmit={submit} className={styles.form}><label>Ожидаемый сценарий<select value={expected} onChange={event => { setExpected(event.target.value); setSaved(null); }} disabled={busy} required><option value="">Выберите сценарий</option>{catalog.map(s => <option key={s.scenario_id} value={s.scenario_id}>{s.scenario_id} · {scenarioDisplayName(s.scenario_id, s.name)}</option>)}{systemIds.map(id => <option key={id} value={id}>{scenarioDisplayName(id)}</option>)}</select></label><label>Комментарий<textarea value={note} onChange={event => { setNote(event.target.value); setSaved(null); }} maxLength={1500} rows={3} disabled={busy} placeholder="Почему нужен этот маршрут?" /></label>{error && <ErrorNotice message={error} />}{saved && <div className={styles.success} role="status"><Check size={15} />Оценка сохранена: {saved.matchesPrimary ? "маршрут подтверждён" : "отмечена ошибка основного маршрута"}.</div>}<button className="button button-secondary button-small" type="submit" disabled={busy || !expected}>{busy ? <Spinner /> : <Save size={14} />}Сохранить оценку</button></form></section>;
@@ -111,7 +113,7 @@ export function CatalogEditor({ scenario: incomingScenario, catalog, expectedHas
   const normalizedRules = rules.map(rule => ({ condition: rule.condition.trim(), use_instead: rule.use_instead }));
   if (JSON.stringify(normalizedRules) !== JSON.stringify(scenario.not_this_if)) patch.not_this_if = normalizedRules;
   async function save(event: React.FormEvent) {
-    event.preventDefault(); if (busy || !Object.keys(patch).length || committedHash) return;
+    event.preventDefault(); if (busyRef.current || !Object.keys(patch).length || committedHash) return;
     setBusy(true); busyRef.current = true; setError(null); setConflict(false);
     try {
       const result = await api<{ revision: Revision }>(`/api/catalog/${scenario.scenario_id}`, { method: "PATCH", body: JSON.stringify({ expectedHash, patch }) });
@@ -121,6 +123,7 @@ export function CatalogEditor({ scenario: incomingScenario, catalog, expectedHas
     finally { setBusy(false); busyRef.current = false; }
   }
   async function reload() {
+    if (busyRef.current) return;
     setBusy(true); busyRef.current = true; setError(null);
     try { await onSaved(committedHash ?? ""); onClose(); } catch (err) { setError(readableError(err)); }
     finally { setBusy(false); busyRef.current = false; }

@@ -31,6 +31,7 @@ export function VoiceWorkspace() {
   const [phase, setPhase] = useState<Phase>(null);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [loadingSession, setLoadingSession] = useState(false);
+  const [operatorBusy, setOperatorBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [autoSpeak, setAutoSpeak] = useState(true);
@@ -47,6 +48,12 @@ export function VoiceWorkspace() {
   const audioAbortRef = useRef<AbortController | null>(null);
   const speechSequenceRef = useRef(0);
   const submittingRef = useRef(false);
+  const sessionChangeRef = useRef(false);
+  const refreshingRef = useRef(false);
+  const recordingBusyRef = useRef(false);
+  const autoSpeakRef = useRef(true);
+  const operatorDraftsRef = useRef(new Map<string, string>());
+  const operatorRequestsRef = useRef(new Map<string, string>());
   const pendingRequestRef = useRef<{ sessionId: string; text: string; mode: "text" | "voice"; requestId: string } | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -70,6 +77,7 @@ export function VoiceWorkspace() {
   }, []);
 
   const initialize = useCallback(async () => {
+    operatorDraftsRef.current.clear(); operatorRequestsRef.current.clear();
     setBooting(true); setError(null); setBootstrap(null); setDetail(null); detailRef.current = null; setSelectedTurnId(null);
     try {
       const auth = await api<{ authenticated: boolean; role?: Role }>("/api/auth");
@@ -100,6 +108,7 @@ export function VoiceWorkspace() {
     void initialize();
     return () => {
       mountedRef.current = false;
+      speechSequenceRef.current += 1;
       cancelRecordingRef.current = true;
       if (recorderRef.current?.state === "recording") recorderRef.current.stop();
       streamRef.current?.getTracks().forEach(track => track.stop());
@@ -156,11 +165,12 @@ export function VoiceWorkspace() {
   }
 
   function handleError(err: unknown) {
-    if (err instanceof ApiError && err.status === 401) { stopAudio(); setAuthenticated(false); setBootstrap(null); setDetail(null); detailRef.current = null; setDraft(""); pendingRequestRef.current = null; }
+    if (err instanceof ApiError && err.status === 401) { stopAudio(); setAuthenticated(false); setBootstrap(null); setDetail(null); detailRef.current = null; setDraft(""); pendingRequestRef.current = null; operatorDraftsRef.current.clear(); operatorRequestsRef.current.clear(); }
     setError(readableError(err));
   }
 
   async function playSpeech(sessionId: string, turn: Turn, cycleStartedAt?: number) {
+    if (!mountedRef.current || detailRef.current?.session.id !== sessionId || sessionChangeRef.current) return;
     stopAudio();
     const sequence = speechSequenceRef.current;
     const controller = new AbortController();
@@ -175,23 +185,31 @@ export function VoiceWorkspace() {
         const data = await response.json().catch(() => null);
         throw new ApiError(typeof data?.error === "string" ? data.error : data?.error?.message ?? "Озвучивание сейчас недоступно. Текст ответа сохранён.", response.status);
       }
+      if (sequence !== speechSequenceRef.current || controller.signal.aborted || detailRef.current?.session.id !== sessionId) return;
+      const lastPlaybackCached = response.headers.get("X-Audio-Cached") === "true";
+      setDetail(current => {
+        if (!current || current.session.id !== sessionId) return current;
+        const updated = { ...current, turns: current.turns.map(item => item.id === turn.id ? { ...item, trace: { ...item.trace, timings: { ...item.trace.timings, lastPlaybackCached } } } : item) };
+        detailRef.current = updated;
+        return updated;
+      });
       const playback = await createAudioPlayback(response, controller.signal, () => {
         if (sequence !== speechSequenceRef.current || controller.signal.aborted) return;
         setError("Аудиопоток прервался. Текст ответа сохранён."); stopAudio();
       });
       const { audio, url } = playback;
-      if (sequence !== speechSequenceRef.current || controller.signal.aborted) { audio.pause(); URL.revokeObjectURL(url); return; }
+      if (sequence !== speechSequenceRef.current || controller.signal.aborted || detailRef.current?.session.id !== sessionId) { audio.pause(); URL.revokeObjectURL(url); return; }
       audioUrlRef.current = url;
       audioRef.current = audio;
       audio.onended = () => {
-        if (sequence !== speechSequenceRef.current) return;
+        if (sequence !== speechSequenceRef.current || detailRef.current?.session.id !== sessionId) return;
         setPlayingTurnId(null); audioRef.current = null;
         URL.revokeObjectURL(url); audioUrlRef.current = null;
       };
       audio.onerror = () => { if (sequence === speechSequenceRef.current) { setError("Браузер не смог воспроизвести ответ. Текст сохранён; попробуйте воспроизвести его ещё раз."); stopAudio(); } };
       let firstPlaybackRecorded=false;
       audio.onplaying = () => {
-        if (sequence !== speechSequenceRef.current) return;
+        if (!mountedRef.current || sequence !== speechSequenceRef.current || detailRef.current?.session.id !== sessionId) { audio.pause(); return; }
         setPlayingTurnId(turn.id); setAudioLoadingId(null);
         if (cycleStartedAt != null && !firstPlaybackRecorded) {
           firstPlaybackRecorded=true;
@@ -203,7 +221,7 @@ export function VoiceWorkspace() {
               detailRef.current = updated;
               return updated;
             });
-          }).catch(() => { setError("Ответ воспроизведён, но время воспроизведения не удалось сохранить."); });
+          }).catch(() => { if (mountedRef.current && sequence === speechSequenceRef.current && detailRef.current?.session.id === sessionId) setError("Ответ воспроизведён, но время воспроизведения не удалось сохранить."); });
         }
       };
       await playback.start();
@@ -225,7 +243,7 @@ export function VoiceWorkspace() {
   }
 
   async function sendTurn(text: string, mode: "text" | "voice", sttMs?: number, cycleStartedAt = performance.now()) {
-    if (!text.trim() || submittingRef.current) return;
+    if (!text.trim() || submittingRef.current || sessionChangeRef.current || operatorBusy) return;
     if (text.trim().length > 3000) { setError("Сообщение слишком длинное. Сократите его до 3000 символов."); setPhase(null); return; }
     if (detailRef.current?.session.state.status === "closed") { setError("Этот разговор завершён. Нажмите «Новый разговор», чтобы продолжить с новым обращением."); setPhase(null); return; }
     submittingRef.current = true;
@@ -241,7 +259,7 @@ export function VoiceWorkspace() {
       setDraft(current => current.trim() === text.trim() ? "" : current);
       void refreshBootstrap().catch(() => { /* The saved response is authoritative; the refresh button can retry summaries. */ });
     } catch (err) { handleError(err); } finally { submittingRef.current = false; setPhase(null); }
-    if (result && autoSpeak && result.turns.length && result.session.state.status !== "handoff") await playSpeech(result.session.id, result.turns.at(-1)!, cycleStartedAt);
+    if (result && autoSpeakRef.current && detailRef.current?.session.id === result.session.id && !sessionChangeRef.current && result.turns.length && result.session.state.status !== "handoff") await playSpeech(result.session.id, result.turns.at(-1)!, cycleStartedAt);
     textareaRef.current?.focus();
   }
 
@@ -259,13 +277,14 @@ export function VoiceWorkspace() {
   }
 
   async function startRecording() {
-    if (phase || loadingSession) return;
+    if (phase || sessionChangeRef.current || recordingBusyRef.current || submittingRef.current || operatorBusy || detailRef.current?.session.state.status === "closed") return;
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") { setError("В этом браузере запись недоступна. Откройте приложение по HTTPS в современном браузере или используйте текстовый ввод."); return; }
+    recordingBusyRef.current = true;
     stopAudio(); setError(null); setPhase("requesting-mic");
     cancelRecordingRef.current = false;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-      if (!mountedRef.current || cancelRecordingRef.current) { stream.getTracks().forEach(track => track.stop()); return; }
+      if (!mountedRef.current || cancelRecordingRef.current) { stream.getTracks().forEach(track => track.stop()); recordingBusyRef.current = false; return; }
       streamRef.current = stream;
       const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find(value => MediaRecorder.isTypeSupported(value));
       if (!mime) throw new Error("Браузер не поддерживает формат записи для распознавания. Используйте Chrome, Edge, Safari или текстовый ввод.");
@@ -285,6 +304,7 @@ export function VoiceWorkspace() {
         if (maxTimerRef.current) clearTimeout(maxTimerRef.current);
         stream.getTracks().forEach(track => track.stop());
         streamRef.current = null; recorderRef.current = null;
+        recordingBusyRef.current = false;
         if (!mountedRef.current) return;
         if (cancelRecordingRef.current) { setPhase(null); return; }
         if (oversized || size > MAX_AUDIO_BYTES) { setPhase(null); setError("Запись превысила 3 МБ. Запишите более короткое обращение или используйте текстовый ввод."); return; }
@@ -298,6 +318,7 @@ export function VoiceWorkspace() {
       maxTimerRef.current = setTimeout(() => { if (recorder.state === "recording") recorder.stop(); }, MAX_RECORDING_MS);
     } catch (err) {
       streamRef.current?.getTracks().forEach(track => track.stop()); streamRef.current = null;
+      recordingBusyRef.current = false;
       setPhase(null);
       const name = err instanceof DOMException ? err.name : "";
       setError(name === "NotAllowedError" ? "Нет доступа к микрофону. Разрешите его в настройках браузера или введите обращение текстом." : name === "NotFoundError" ? "Микрофон не найден. Подключите его или используйте текстовый ввод." : `Не удалось включить микрофон. ${readableError(err)}`);
@@ -311,47 +332,61 @@ export function VoiceWorkspace() {
   }
 
   async function newSession() {
-    if (phase || loadingSession) return;
+    if (phase || sessionChangeRef.current || submittingRef.current || recordingBusyRef.current || operatorBusy) return;
+    sessionChangeRef.current = true;
     stopAudio(); setLoadingSession(true); setError(null); setView("conversation");
     try {
       const result = await api<SessionDetail>("/api/sessions", { method: "POST", body: "{}" });
       rememberSession(result); setDraft(""); pendingRequestRef.current = null;
       void refreshBootstrap().catch(() => {});
-    } catch (err) { handleError(err); } finally { setLoadingSession(false); }
+    } catch (err) { handleError(err); } finally { sessionChangeRef.current = false; setLoadingSession(false); }
     textareaRef.current?.focus();
   }
 
   async function openSession(id: string) {
-    if (phase || loadingSession) return;
+    if (phase || sessionChangeRef.current || submittingRef.current || recordingBusyRef.current || operatorBusy) return;
+    sessionChangeRef.current = true;
     stopAudio(); setLoadingSession(true); setError(null);
     try {
       rememberSession(await api<SessionDetail>(`/api/sessions/${id}`));
       setDraft(""); pendingRequestRef.current = null; setView("conversation");
-    } catch (err) { handleError(err); } finally { setLoadingSession(false); }
+    } catch (err) { handleError(err); } finally { sessionChangeRef.current = false; setLoadingSession(false); }
   }
 
   async function refresh() {
-    if (refreshing || phase) return;
-    setRefreshing(true); setError(null);
-    try { await refreshBootstrap(); if (detailRef.current) rememberSession(await api<SessionDetail>(`/api/sessions/${detailRef.current.session.id}`)); } catch (err) { handleError(err); } finally { setRefreshing(false); }
+    if (refreshingRef.current || phase || sessionChangeRef.current || submittingRef.current || operatorBusy) return;
+    const sessionId = detailRef.current?.session.id;
+    refreshingRef.current = true; setRefreshing(true); setError(null);
+    try {
+      await refreshBootstrap();
+      if (sessionId) {
+        const updated = await api<SessionDetail>(`/api/sessions/${sessionId}`);
+        if (!sessionChangeRef.current && detailRef.current?.session.id === sessionId && updated.session.version >= detailRef.current.session.version) rememberSession(updated);
+      }
+    } catch (err) { if (!sessionChangeRef.current && detailRef.current?.session.id === sessionId) handleError(err); }
+    finally { refreshingRef.current = false; setRefreshing(false); }
   }
 
   async function logout() {
-    if (phase) return;
+    if (phase || sessionChangeRef.current || submittingRef.current || recordingBusyRef.current || operatorBusy) return;
     try {
       await api("/api/auth", { method: "DELETE" });
       stopAudio(); setAuthenticated(false); setBootstrap(null); setDetail(null); detailRef.current = null; setDraft(""); setView("conversation");
+      operatorDraftsRef.current.clear(); operatorRequestsRef.current.clear(); pendingRequestRef.current = null;
       try { localStorage.removeItem(SESSION_KEY); } catch { /* Optional convenience only. */ }
     } catch (err) { handleError(err); }
   }
 
-  function useExample(text: string) { setView("conversation"); setDraft(text); requestAnimationFrame(() => textareaRef.current?.focus()); }
+  function useExample(text: string) {
+    if (detailRef.current?.session.state.status === "closed") { setView("conversation"); setError("Этот разговор завершён. Создайте новый разговор, затем выберите пример."); return; }
+    setView("conversation"); setDraft(text); requestAnimationFrame(() => textareaRef.current?.focus());
+  }
 
   if (booting) return <main className="boot-screen"><Logo /><Spinner label="Подключаем рабочее пространство…" /></main>;
   if (!authenticated) return <Login onSuccess={initialize} initialError={error} />;
   if (!bootstrap) return <main className="boot-screen"><Logo /><ErrorNotice message={error || "Не удалось загрузить рабочее пространство."} /><button className="button button-primary" onClick={() => void initialize()}><RefreshCw size={16} />Повторить подключение</button><button className="button button-ghost" onClick={() => void logout()}>Выйти</button></main>;
 
-  const busy = phase !== null || loadingSession;
+  const busy = phase !== null || loadingSession || operatorBusy;
   const voiceBusy = phase && phase !== "recording";
   const currentSession = detail?.session;
   const canSendText = currentSession?.state.status !== "closed" && bootstrap.configured.database && (bootstrap.configured.ai || currentSession?.state.status === "handoff");
@@ -375,18 +410,19 @@ export function VoiceWorkspace() {
         <div className="stats-grid"><Stat label="Разговоров" value={bootstrap.stats.sessions} icon={<MessageSquare size={17} />} note="В вашем рабочем пространстве" /><Stat label="Обработано реплик" value={bootstrap.stats.turns} icon={<AudioLines size={17} />} note="С сохранённым результатом" /><Stat label="У оператора" value={bootstrap.stats.handoffs} icon={<Headphones size={17} />} note="Открытые обращения с контекстом" /><Stat label="Выбор маршрута" value={bootstrap.stats.turns ? duration(bootstrap.stats.medianRoutingMs) : "—"} icon={<GitBranch size={17} />} note="Медиана времени маршрутизации" /></div>
         {error && <div className="global-error"><ErrorNotice message={error} onDismiss={() => setError(null)} /></div>}
         {(!bootstrap.configured.ai || !bootstrap.configured.database) && <div className="configuration-notice"><ShieldCheck size={17} /><span>{!bootstrap.configured.database ? "Хранилище не подключено. Сохранение разговоров недоступно." : "AI-сервис не подключён. Обработка новых обращений пока недоступна."}</span></div>}
-        {view === "conversation" ? <div className="conversation-layout"><section className="conversation-panel" aria-label="Разговор"><div className="conversation-heading"><span className="conversation-heading-icon"><AudioLines size={21} /></span><div className="conversation-title"><h2>{currentSession?.title || "Новый разговор"}</h2><span>{currentSession ? <><i className={`state-dot state-${currentSession.state.status}`} />{sessionStatus(currentSession.state.status)}<span className="dot-separator">·</span>{languageLabel(currentSession.state.language)}</> : <>Готовы к первому обращению<span className="dot-separator">·</span>RU / KZ</>}</span></div>{currentSession && <a href={`/api/sessions/${currentSession.id}/export`} download className="icon-button" aria-label="Скачать историю разговора в JSON" title="Скачать историю в JSON"><ArrowDownToLine size={18} /></a>}<button className={`icon-button ${autoSpeak ? "audio-enabled" : ""}`} onClick={() => { setAutoSpeak(value => !value); if (autoSpeak) stopAudio(); }} aria-label={autoSpeak ? "Выключить автоматическое озвучивание" : "Включить автоматическое озвучивание"} aria-pressed={autoSpeak} title={autoSpeak ? "Автоматическое озвучивание включено" : "Автоматическое озвучивание выключено"}>{autoSpeak ? <Volume2 size={18} /> : <VolumeX size={18} />}</button></div>
+        {view === "conversation" ? <div className="conversation-layout"><section className="conversation-panel" aria-label="Разговор"><div className="conversation-heading"><span className="conversation-heading-icon"><AudioLines size={21} /></span><div className="conversation-title"><h2>{currentSession?.title || "Новый разговор"}</h2><span>{currentSession ? <><i className={`state-dot state-${currentSession.state.status}`} />{sessionStatus(currentSession.state.status)}<span className="dot-separator">·</span>{languageLabel(currentSession.state.language)}</> : <>Готовы к первому обращению<span className="dot-separator">·</span>RU / KZ</>}</span></div>{currentSession && <a href={`/api/sessions/${currentSession.id}/export`} download className="icon-button" aria-label="Скачать историю разговора в JSON" title="Скачать историю в JSON"><ArrowDownToLine size={18} /></a>}<button className={`icon-button ${autoSpeak ? "audio-enabled" : ""}`} onClick={() => { autoSpeakRef.current = !autoSpeakRef.current; setAutoSpeak(autoSpeakRef.current); if (!autoSpeakRef.current) stopAudio(); }} aria-label={autoSpeak ? "Выключить автоматическое озвучивание" : "Включить автоматическое озвучивание"} aria-pressed={autoSpeak} title={autoSpeak ? "Автоматическое озвучивание включено" : "Автоматическое озвучивание выключено"}>{autoSpeak ? <Volume2 size={18} /> : <VolumeX size={18} />}</button></div>
           <div className="conversation-body" aria-live="polite" aria-relevant="additions text">{loadingSession ? <div className="conversation-loading"><Spinner label="Открываем разговор…" /></div> : !detail?.turns.length ? <div className="conversation-empty"><div className="voice-orbit" aria-hidden="true"><div className="voice-orbit-ring" /><div className="voice-orbit-core"><AudioLines size={39} strokeWidth={1.45} /></div><span className="orbit-badge"><Check size={12} /></span></div><span className="empty-eyebrow">ГОТОВЫ СЛУШАТЬ</span><h2>С чего начнём разговор?</h2><p>Расскажите о своём вопросе голосом или текстом.<br className="desktop-break" />Маршрутизатор подберёт подходящий сценарий.</p><div className="starter-label">МОЖНО НАЧАТЬ С ФРАЗЫ ИЗ КАТАЛОГА</div><div className="conversation-starters">{exampleScenarios.map(s => <button disabled={busy} key={s.scenario_id} onClick={() => useExample(s.examples.ru[0])}><span>{s.examples.ru[0]}</span><ArrowRight size={15} /></button>)}</div><span className="language-support"><Languages size={14} />Русский и қазақша · язык определяется автоматически</span></div> : <div className="messages"><div className="conversation-date"><span>{new Date(detail.session.createdAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long" })}</span></div>{detail.turns.map((turn, index) => <div className="turn-group" key={turn.id}>{turn.mode !== "operator" && turn.userText && <div className="message message-user"><div className="message-meta"><span>{bootstrap.viewer.role === "supervisor" ? "Клиент" : "Вы"}</span><time>{time(turn.createdAt)}</time>{turn.mode === "voice" && <Mic size={12} />}</div><div className="message-bubble">{turn.userText}</div></div>}<div className={`message message-assistant ${selectedTurnId === turn.id ? "message-selected" : ""}`}><span className="assistant-avatar">{turn.mode === "operator" ? <Headphones size={16} /> : <AudioLines size={17} />}</span><div className="assistant-message-content"><div className="message-meta"><strong>{turn.mode === "operator" ? "Оператор" : "DIR ECHOES"}</strong><span>{turn.mode === "operator" ? "Человек в диалоге" : turn.trace.source === "operator" ? "Система" : "AI-ассистент"}</span></div><div className="message-bubble">{turn.assistantText}</div><div className="message-actions"><button onClick={() => { if (playingTurnId === turn.id || audioLoadingId === turn.id) stopAudio(); else void playSpeech(detail.session.id, turn); }} disabled={busy && audioLoadingId !== turn.id} aria-label={playingTurnId === turn.id ? "Остановить озвучивание" : "Слушать ответ"}>{audioLoadingId === turn.id ? <Spinner /> : playingTurnId === turn.id ? <Square size={12} fill="currentColor" /> : <Volume2 size={13} />}{audioLoadingId === turn.id ? "Подготовка…" : playingTurnId === turn.id ? "Остановить" : "Слушать ответ"}</button><button className={selectedTurnId === turn.id ? "selected" : ""} onClick={() => setSelectedTurnId(turn.id)}><GitBranch size={13} />Решение {index + 1}<ChevronRight size={12} /></button><span className="message-duration"><Clock3 size={11} />{duration(turn.trace.timings.serverTotal)}</span></div></div></div></div>)}</div>}
           {phase && phase !== "recording" && phase !== "requesting-mic" && <div className="processing-message" role="status"><span className="assistant-avatar"><AudioLines size={17} /></span><Spinner label={phaseLabel} /></div>}<div ref={messageEndRef} /></div>
           {currentSession?.state.pendingConfirmation && <div className="conversation-confirmation"><ShieldCheck size={17} /><span>Перед выполнением операции нужно ваше подтверждение.</span></div>}
           {currentSession?.state.status === "handoff" && <div className="conversation-handoff"><Headphones size={17} /><span>Обращение передано оператору вместе с контекстом.</span><button onClick={() => void refresh()} disabled={busy || refreshing}>Проверить ответ</button></div>}
           <div className="composer"><div className={`voice-control ${phase === "recording" ? "is-recording" : ""}`}><div className="voice-control-copy"><span className={`voice-control-symbol ${phase === "recording" ? "recording-pulse" : ""}`}>{phase === "recording" ? <Mic size={20} /> : <AudioLines size={21} />}</span><div><strong>{phase === "recording" ? "Запись идёт" : voiceBusy ? phaseLabel : "Скажите — мы разберёмся"}</strong><span>{phase === "recording" ? `00:${String(recordingSeconds).padStart(2, "0")} / 00:45 · остановите, чтобы отправить` : "До 45 секунд · ответ озвучивается голосом AI"}</span></div></div><div className="voice-control-buttons">{phase === "recording" ? <><button className="icon-button" onClick={() => stopRecording(true)} aria-label="Отменить запись" title="Отменить запись"><X size={17} /></button><button className="button button-recording" onClick={() => stopRecording()}><Square size={13} fill="currentColor" />Отправить</button></> : phase === "synthesizing" ? <button className="button button-secondary button-small" onClick={stopAudio}><Square size={13} />Отменить звук</button> : <button className="button button-mic" onClick={() => void startRecording()} disabled={busy || currentSession?.state.status === "closed" || !bootstrap.configured.ai || !bootstrap.configured.database}>{voiceBusy ? <Spinner /> : <Mic size={16} />}{phase === "requesting-mic" ? "Доступ…" : "Начать запись"}</button>}</div></div>
+          <p className="tiny muted">Используйте данные кейса. Не вводите и не произносите реальные персональные данные.</p>
           <form className="text-composer" onSubmit={event => { event.preventDefault(); if (!busy) void sendTurn(draft, "text"); }}><label className="visually-hidden" htmlFor="message-input">{currentSession?.state.status === "handoff" ? "Сообщение оператору" : "Текст обращения"}</label><textarea ref={textareaRef} id="message-input" placeholder={currentSession?.state.status === "closed" ? "Разговор завершён. Начните новый." : currentSession?.state.status === "handoff" ? "Сообщение оператору…" : "Или напишите обращение…"} value={draft} rows={1} maxLength={3000} disabled={busy || !canSendText} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!busy) void sendTurn(draft, "text"); } }} /><button className="send-button" type="submit" aria-label={currentSession?.state.status === "handoff" ? "Отправить сообщение оператору" : "Отправить обращение"} title="Отправить · Enter" disabled={busy || !draft.trim() || !canSendText}><ArrowRight size={20} /></button></form><div className="composer-footnote"><span><LockKeyhole size={11} />Разговор сохраняется в рабочем пространстве</span><span>Enter — отправить</span></div></div>
-        </section><TracePanel detail={detail} catalog={bootstrap.catalog} selectedTurnId={selectedTurnId} onSelectTurn={setSelectedTurnId} isSupervisor={bootstrap.viewer.role === "supervisor"} /></div> : view === "history" ? <HistoryView sessions={bootstrap.sessions} onOpen={id => void openSession(id)} onNew={() => void newSession()} currentId={currentSession?.id} /> : view === "catalog" ? <CatalogView catalog={bootstrap.catalog} onExample={useExample} canEdit={bootstrap.viewer.role === "supervisor"} catalogHash={bootstrap.datasetHash} onCatalogChanged={refreshBootstrap} /> : view === "supervision" && bootstrap.viewer.role === "supervisor" ? <SupervisorDashboard catalog={bootstrap.catalog} onOpen={id => void openSession(id)} /> : <OperatorsView handoffs={bootstrap.handoffs} onChanged={refreshBootstrap} onOpen={id => void openSession(id)} />}
+        </section><TracePanel detail={detail} catalog={bootstrap.catalog} selectedTurnId={selectedTurnId} onSelectTurn={setSelectedTurnId} isSupervisor={bootstrap.viewer.role === "supervisor"} /></div> : view === "history" ? <HistoryView sessions={bootstrap.sessions} onOpen={id => void openSession(id)} onNew={() => void newSession()} currentId={currentSession?.id} /> : view === "catalog" ? <CatalogView catalog={bootstrap.catalog} onExample={useExample} canEdit={bootstrap.viewer.role === "supervisor"} catalogHash={bootstrap.datasetHash} onCatalogChanged={refreshBootstrap} /> : view === "supervision" && bootstrap.viewer.role === "supervisor" ? <SupervisorDashboard catalog={bootstrap.catalog} onOpen={id => void openSession(id)} /> : <OperatorsView handoffs={bootstrap.handoffs} onChanged={refreshBootstrap} onOpen={id => void openSession(id)} drafts={operatorDraftsRef.current} requests={operatorRequestsRef.current} onBusyChange={setOperatorBusy} />}
         <footer className="page-footer"><span>DIR ECHOES <span>Гибридный голосовой маршрутизатор</span></span><span>Данные кейса на {bootstrap.businessDate} <span className="footer-dot">·</span> Каталог {bootstrap.datasetHash.slice(0, 8)}</span></footer>
       </main>
     </div>
-    {helpOpen && <div className="modal-backdrop" onClick={event => { if (event.target === event.currentTarget) setHelpOpen(false); }}><section ref={helpModalRef} className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title"><button className="modal-close icon-button" autoFocus onClick={() => setHelpOpen(false)} aria-label="Закрыть справку"><X size={19} /></button><span className="empty-icon"><AudioLines size={26} /></span><span className="section-eyebrow">РАБОТА С ЛИНИЕЙ</span><h2 id="help-title">От обращения к действию</h2><ol><li><span>01</span><div><strong>Расскажите о вопросе</strong><p>Запишите до 45 секунд речи и остановите запись, чтобы отправить. Текстовый ввод доступен в том же разговоре.</p></div></li><li><span>02</span><div><strong>Следите за решением</strong><p>Справа показаны сценарий, объяснение выбора, параметры и выполненные действия. Ответьте на уточняющие вопросы.</p></div></li><li><span>03</span><div><strong>Подтвердите важные действия</strong><p>Маршрутизатор попросит подтверждение перед значимой операцией. Если нужен человек, контекст будет передан оператору.</p></div></li></ol><p className="help-note">История сохраняется. Вернитесь к разговору из раздела «История». Голосовые ответы создаются AI.</p><button className="button button-primary" onClick={() => setHelpOpen(false)}>Понятно<ArrowRight size={16} /></button></section></div>}
+    {helpOpen && <div className="modal-backdrop" onClick={event => { if (event.target === event.currentTarget) setHelpOpen(false); }}><section ref={helpModalRef} className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title"><button className="modal-close icon-button" autoFocus onClick={() => setHelpOpen(false)} aria-label="Закрыть справку"><X size={19} /></button><span className="empty-icon"><AudioLines size={26} /></span><span className="section-eyebrow">РАБОТА С ЛИНИЕЙ</span><h2 id="help-title">От обращения к действию</h2><ol><li><span>01</span><div><strong>Расскажите о вопросе</strong><p>Запишите до 45 секунд речи и остановите запись, чтобы отправить. Текстовый ввод доступен в том же разговоре.</p></div></li><li><span>02</span><div><strong>Следите за решением</strong><p>Справа показаны сценарий, объяснение выбора, параметры и выполненные действия. Ответьте на уточняющие вопросы.</p></div></li><li><span>03</span><div><strong>Подтвердите действие</strong><p>Маршрутизатор попросит подтверждение перед любым изменением данных или запросом внешнего действия. Если нужен человек, контекст будет передан оператору.</p></div></li></ol><p className="help-note">История сохраняется. Вернитесь к разговору из раздела «История». Голосовые ответы создаются AI.</p><button className="button button-primary" onClick={() => setHelpOpen(false)}>Понятно<ArrowRight size={16} /></button></section></div>}
   </div>;
 }
 
@@ -408,5 +444,5 @@ function Login({ onSuccess, initialError }: { onSuccess: () => Promise<void>; in
     setBusy(true); setError(null);
     try { await api("/api/auth", { method: "POST", body: JSON.stringify({ code: code.trim(), role }) }); setCode(""); await onSuccess(); } catch (err) { setError(readableError(err)); } finally { setBusy(false); }
   }
-  return <main className="login-page"><section className="login-story"><Logo /><div className="login-story-main"><span className="login-eyebrow"><span />VOICE OPERATIONS PLATFORM</span><h1>Слышать запрос.<br />Понимать контекст.<br /><span>Находить решение.</span></h1><p>Гибридный голосовой маршрутизатор<br />для обращений на русском и казахском.</p><div className="login-flow"><span><Mic size={19} />Голос</span><i /><span><GitBranch size={19} />Сценарий</span><i /><span><Check size={19} />Действие</span></div></div><div className="login-story-footer"><span>DIR ECHOES</span><span>VOICE ROUTER / 01</span></div></section><section className="login-form-side"><div className="login-card"><span className="login-lock"><LockKeyhole size={24} /></span><span className="section-eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span><h2>Добро пожаловать</h2><p>Войдите, чтобы начать разговор<br />и работать с обращениями.</p><form onSubmit={submit}><fieldset className="login-role"><legend>Роль</legend><button type="button" className={role === "participant" ? "selected" : ""} onClick={() => setRole("participant")} disabled={busy}><MessageSquare size={16} />Участник</button><button type="button" className={role === "supervisor" ? "selected" : ""} onClick={() => setRole("supervisor")} disabled={busy}><Headphones size={16} />Супервизор</button></fieldset><label htmlFor="access-code">Код доступа</label><div className="login-code"><LockKeyhole size={17} /><input id="access-code" type="password" autoComplete="current-password" placeholder="Введите выданный код" value={code} onChange={e => setCode(e.target.value)} disabled={busy} required maxLength={200} /></div>{error && <ErrorNotice message={error} onDismiss={() => setError(null)} />}<button className="button button-primary login-submit" type="submit" disabled={!code.trim() || busy}>{busy ? <Spinner label="Подключаемся…" /> : <>Войти в рабочее пространство<ArrowRight size={17} /></>}</button></form><div className="login-privacy"><ShieldCheck size={17} /><span>Доступ по коду. История разговоров<br />сохраняется в вашем пространстве.</span></div></div><div className="login-bottom">DIR ECHOES <span>Русский / Қазақша</span></div></section></main>;
+  return <main className="login-page"><section className="login-story"><Logo /><div className="login-story-main"><span className="login-eyebrow"><span />VOICE OPERATIONS PLATFORM</span><h1>Слышать запрос.<br />Понимать контекст.<br /><span>Находить решение.</span></h1><p>Гибридный голосовой маршрутизатор<br />для обращений на русском и казахском.</p><div className="login-flow"><span><Mic size={19} />Голос</span><i /><span><GitBranch size={19} />Сценарий</span><i /><span><Check size={19} />Действие</span></div></div><div className="login-story-footer"><span>DIR ECHOES</span><span>VOICE ROUTER / 01</span></div></section><section className="login-form-side"><div className="login-card"><span className="login-lock"><LockKeyhole size={24} /></span><span className="section-eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span><h2>Добро пожаловать</h2><p>Войдите, чтобы начать разговор<br />и работать с обращениями.</p><form onSubmit={submit}><fieldset className="login-role"><legend>Роль</legend><button type="button" className={role === "participant" ? "selected" : ""} onClick={() => setRole("participant")} disabled={busy}><MessageSquare size={16} />Участник</button><button type="button" className={role === "supervisor" ? "selected" : ""} onClick={() => setRole("supervisor")} disabled={busy}><Headphones size={16} />Супервизор</button></fieldset><label htmlFor="access-code">Код доступа</label><div className="login-code"><LockKeyhole size={17} /><input id="access-code" type="password" autoComplete="current-password" placeholder="Введите выданный код" value={code} onChange={e => setCode(e.target.value)} disabled={busy} required maxLength={200} /></div>{error && <ErrorNotice message={error} onDismiss={() => setError(null)} />}<button className="button button-primary login-submit" type="submit" disabled={!code.trim() || busy}>{busy ? <Spinner label="Подключаемся…" /> : <>Войти в рабочее пространство<ArrowRight size={17} /></>}</button></form><div className="login-privacy"><ShieldCheck size={17} /><span>Доступ по коду. История разговоров<br />сохраняется в вашем пространстве.<br />Используйте данные кейса. Не вводите и не произносите реальные персональные данные.</span></div></div><div className="login-bottom">DIR ECHOES <span>Русский / Қазақша</span></div></section></main>;
 }

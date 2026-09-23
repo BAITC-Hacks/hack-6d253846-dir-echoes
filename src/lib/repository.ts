@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { query, type Sql } from "./db";
 import { ApiError, type Viewer } from "./auth";
+import { redactPersonalText } from "./privacy";
 import type { DialogueState, EntityStore, Handoff, JsonObject, Session, SessionDetail, Trace, Turn } from "./types";
 
 type SessionRow = { id: string; owner_id: string; title: string; state: DialogueState; version: number; created_at: Date | string; updated_at: Date | string; turn_count?: string | number; busy_token?: string; busy_until?: Date | string };
@@ -40,7 +41,7 @@ export function entityStore(sql: Sql): EntityStore { return {
 export async function putHandoff(sql: Sql, sessionId: string, queue: string, reason: string, summary: string) {
   await sql.query("INSERT INTO handoffs(id,session_id,queue,reason,summary) VALUES($1,$2,$3,$4,$5) ON CONFLICT(session_id) WHERE status <> 'closed' DO UPDATE SET queue=EXCLUDED.queue,reason=EXCLUDED.reason,summary=EXCLUDED.summary,updated_at=now()",[randomUUID(),sessionId,queue,reason,summary]);
 }
-function maskString(value: string) { return value.replace(/\+?7\d{10}\b/g,"+7••••••••••").replace(/\b\d{12}\b/g,"••••••••••••").replace(/\b([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/g,"$1***@$2"); }
+function maskString(value: string) { return redactPersonalText(value); }
 export function redact<T>(value: T): T {
   if (typeof value === "string") return maskString(value) as T;
   if (Array.isArray(value)) return value.map(redact) as T;

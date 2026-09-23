@@ -39,7 +39,7 @@ export type DialogueState = {
   unclearCount: number; lastQuestionSlot: string | null; lookupFailures: number;
   status: "active" | "handoff" | "closed";
 };
-export type Timings = { stt: number | null; router: number; executor: number; response: number; serverTotal: number; ttsFirstByte?: number; playback?: number; ttsCacheHit?: boolean };
+export type Timings = { stt: number | null; router: number; executor: number; response: number; serverTotal: number; ttsFirstByte?: number; playback?: number; ttsCacheHit?: boolean; lastPlaybackCached?: boolean };
 export type Trace = {
   scenarios: ScenarioChoice[]; alternatives: ScenarioChoice[]; reason: string;
   language: Language; slots: JsonObject; actions: ActionResult[];
