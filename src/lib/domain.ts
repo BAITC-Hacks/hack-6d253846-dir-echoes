@@ -3,9 +3,11 @@ import type { ActionResult, DialogueState, ExecuteInput, ExecuteOutput, Json, Js
 import { appHelpFailed, MUTATING_ACTIONS, planActions, statusLabel, type ActionPlan } from "./domain-actions";
 import { array, DomainError, localized, lookupKnowledge, mask, normalizeSlot, object, policyStatus, present, productForScenario, regionFromPlate, string } from "./domain-data";
 import { effectiveSlots } from "./routing-slots";
+import { languageFromList, spokenLanguages, stateLanguages } from "./languages";
+import { domainErrorText, domainPhrase, turkishConfirmation, turkishFallback, turkishScenarioName, turkishSlotPrompt } from "./domain-language";
 
 export function initialState(): DialogueState {
-  return { language: "ru", activeScenarioId: null, pendingScenarioIds: [], suspendedScenarioIds: [], completedScenarioIds: [], slots: {}, slotsByScenario: {}, clientId: null, pendingConfirmation: null, unclearCount: 0, lastQuestionSlot: null, lookupFailures: 0, status: "active" };
+  return { language: "ru", responseLanguages: ["ru"], activeScenarioId: null, pendingScenarioIds: [], suspendedScenarioIds: [], completedScenarioIds: [], slots: {}, slotsByScenario: {}, clientId: null, pendingConfirmation: null, unclearCount: 0, lastQuestionSlot: null, lookupFailures: 0, status: "active" };
 }
 
 const identitySlots = ["phone", "iin", "policy_number", "claim_number"];
@@ -28,6 +30,10 @@ function allowedSlots(scenario: Scenario): Set<string> { return new Set([...scen
 
 function defaultQuestion(input: ExecuteInput, state: DialogueState, slot: string): string {
   const def = effectiveSlots(input.dataset).find(s => s.name === slot);
+  if (stateLanguages(state).includes("tr")) {
+    const options = def?.values?.length && def.values.every(value => typeof value === "number") ? ` Seçenekler: ${def.values.join(", ")}${slot === "term_months" ? " ay" : " tenge"}.` : "";
+    return turkishSlotPrompt(state, slot, def?.prompt.ru ?? "Уточните недостающие данные.", def?.prompt.kk ?? "Жетіспейтін деректерді нақтылаңыз.", mixedSlotQuestions[slot], options);
+  }
   if (def && state.language === "mixed" && mixedSlotQuestions[slot]) return mixedSlotQuestions[slot];
   return def?.prompt[state.language === "kk" ? "kk" : "ru"] ?? localized(state.language, "Уточните недостающие данные.", "Жетіспейтін деректерді нақтылаңыз.", "Уточните, пожалуйста, жетіспейтін деректерді.");
 }
@@ -61,7 +67,9 @@ function reviewSignature(plan: ActionPlan): string {
   return createHash("sha256").update(JSON.stringify(reviewed)).digest("hex");
 }
 
-function confirmationSummary(scenario: Scenario, slots: JsonObject, plan: ActionPlan, language: DialogueState["language"]): string {
+function confirmationSummary(scenario: Scenario, slots: JsonObject, plan: ActionPlan, state: DialogueState): string {
+  const language = state.language;
+  if (stateLanguages(state).includes("tr")) return domainPhrase(state, "", "", undefined, turkishConfirmation(scenario, slots, plan));
   const values = plan.results.filter(a => a.status === "preview").map(a => {
     const d = a.data;
     if (a.name === "cancel_policy") return localized(language, `Расторгнуть полис ${slots.policy_number}; расчёт возврата ${d.refund_amount} тенге`, `${slots.policy_number} полисін бұзу; есептелген қайтарым ${d.refund_amount} теңге`);
@@ -83,6 +91,7 @@ function confirmationSummary(scenario: Scenario, slots: JsonObject, plan: Action
 }
 
 function fallbackReply(scenario: Scenario, plan: ActionPlan, state: DialogueState): string {
+  if (stateLanguages(state).includes("tr")) return domainPhrase(state, "", "", undefined, turkishFallback(scenario, plan));
   const lang = state.language, find = (name: string) => object(plan.facts[name]);
   const quote = plan.results.find(a => prices.includes(a.name));
   if (plan.handoff) {
@@ -170,9 +179,11 @@ function complete(state: DialogueState, scenario: Scenario): void {
 export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
   const state = structuredClone(input.state), { dataset, decision, store } = input;
   const slotDefinitions = effectiveSlots(dataset);
-  state.language = decision.responseLanguage ?? (decision.language === "mixed" ? (input.state.language === "kk" ? "kk" : "ru") : decision.language);
+  const replyLanguage = decision.responseLanguage ?? decision.language;
+  state.responseLanguages = spokenLanguages(replyLanguage, decision.responseLanguages ?? (replyLanguage === input.state.language ? stateLanguages(input.state) : undefined));
+  state.language = languageFromList(state.responseLanguages);
   const output: ExecuteOutput = { state, actions: [], reply: "", facts: {}, warnings: [] };
-  const text = (ru: string, kk: string, mixed?: string) => localized(state.language, ru, kk, mixed);
+  const text = (ru: string, kk: string, mixed?: string, tr?: string) => domainPhrase(state, ru, kk, mixed, tr);
   const handoff = (queue: string, reason: string, authorized = false): ExecuteOutput => {
     const selectedQueue = dataset.queues.includes(queue) ? queue : "operator_general";
     if (!authorized) {
@@ -232,8 +243,8 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
   if (!continued && (!primary || primary.confidence < 0.75 || primary.scenarioId === "SYS_UNCLEAR")) {
     state.unclearCount = (!primary || primary.confidence < 0.45 || primary.scenarioId === "SYS_UNCLEAR") ? state.unclearCount + 1 : 0;
     if ((!primary || primary.confidence < 0.45 || primary.scenarioId === "SYS_UNCLEAR") && state.unclearCount >= 2) return handoff("operator_general", "Two unresolved low-confidence turns");
-    const choices = [...ranked, ...decision.alternatives].filter(c => dataset.scenarios.some(s => s.scenario_id === c.scenarioId)).slice(0, 2).map(c => dataset.scenarios.find(s => s.scenario_id === c.scenarioId)!.name);
-    output.reply = decision.clarification || (choices.length === 2 ? text(`Вы хотите: ${choices[0]} или ${choices[1]}?`, `${choices[0]} немесе ${choices[1]} керек пе?`, `Уточните, қайсысы керек: ${choices[0]} немесе ${choices[1]}?`) : text("Уточните, пожалуйста: вам нужна информация, действие по полису или помощь со страховым случаем?", "Нақтылаңызшы: ақпарат, полис бойынша әрекет немесе сақтандыру оқиғасына көмек керек пе?", "Нақтылаңызшы: нужна информация, действие по полису немесе помощь со страховым случаем?")); return output;
+    const choices = [...ranked, ...decision.alternatives].filter(c => dataset.scenarios.some(s => s.scenario_id === c.scenarioId)).slice(0, 2).map(c => { const choice = dataset.scenarios.find(s => s.scenario_id === c.scenarioId)!; return stateLanguages(state).includes("tr") ? turkishScenarioName(choice) : choice.name; });
+    output.reply = decision.clarification || (choices.length === 2 ? text(`Вы хотите: ${choices[0]} или ${choices[1]}?`, `${choices[0]} немесе ${choices[1]} керек пе?`, `Уточните, қайсысы керек: ${choices[0]} немесе ${choices[1]}?`, `Hangisini istiyorsunuz: ${choices[0]} veya ${choices[1]}?`) : text("Уточните, пожалуйста: вам нужна информация, действие по полису или помощь со страховым случаем?", "Нақтылаңызшы: ақпарат, полис бойынша әрекет немесе сақтандыру оқиғасына көмек керек пе?", "Нақтылаңызшы: нужна информация, действие по полису немесе помощь со страховым случаем?")); return output;
   }
   state.unclearCount = 0;
   const targetId = continued ? state.activeScenarioId! : primary!.scenarioId;
@@ -332,33 +343,33 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
     output.warnings.push(...plan.warnings);
     if (needsConfirmation && (!confirmed || changedAtExecution)) {
       const previewPlan = { ...plan, results: plan.results.map(a => MUTATING_ACTIONS.has(a.name) ? { ...a, status: "preview" as const } : a) };
-      const summary = confirmationSummary(scenario, state.slots, previewPlan, state.language);
+      const summary = confirmationSummary(scenario, state.slots, previewPlan, state);
       const snapshot = { ...structuredClone(state.slots), __review: signature };
       state.pendingConfirmation = { id: changedAtExecution ? randomUUID() : pending?.id ?? randomUUID(), scenarioId: targetId, actionNames: [...new Set(plan.results.filter(action => MUTATING_ACTIONS.has(action.name)).map(action => action.name))], slots: snapshot, summary, createdAt: changedAtExecution ? new Date().toISOString() : pending?.createdAt ?? new Date().toISOString() };
       output.actions = plan.results.map(a => a.status === "executed" || a.status === "queued" ? { ...a, status: "preview" } : a);
       const safety = targetId === "SC11" ? text("Если есть пострадавшие, сразу звоните сто двенадцать. ", "Зардап шеккендер болса, бірден жүз он екіге қоңырау шалыңыз. ") : targetId === "SC38" ? text("Никому не сообщайте SMS-коды, CVV и PIN. ", "Ешкімге SMS кодын, CVV және PIN айтпаңыз. ") : "";
       const office = object(plan.facts.get_offices);
-      let readAnswer = targetId === "SC33" && office.address ? text(`Офис: ${office.address}, ${office.hours}. `, `Кеңсе: ${office.address}, ${office.hours}. `) : "";
+      let readAnswer = targetId === "SC33" && office.address ? text(`Офис: ${office.address}, ${office.hours}. `, `Кеңсе: ${office.address}, ${office.hours}. `, undefined, `Ofis: ${office.address}, ${office.hours}. `) : "";
       if (targetId === "SC23") {
         const clinics = array(object(plan.facts.list_clinics).clinics).map(value => { const clinic = object(value); return `${clinic.name} — ${clinic.address}`; }).join("; ");
-        readAnswer = text(`Клиники: ${clinics}. `, `Емханалар: ${clinics}. `);
+        readAnswer = text(`Клиники: ${clinics}. `, `Емханалар: ${clinics}. `, undefined, `Klinikler: ${clinics}. `);
       }
       if (targetId === "SC24") readAnswer = text("Электронная карта находится в приложении в разделе «Мои полисы». ", "Электрондық карта қосымшадағы «Менің полистерім» бөлімінде орналасқан. ");
       if (targetId === "SC34") readAnswer = `${fallbackReply(scenario, { ...plan, handoff: undefined }, state)} `;
       if (targetId === "SC18") {
-        const documents: Record<string, [string, string]> = {
-          "ID card": ["удостоверение личности", "жеке куәлік"], "Driving licence": ["водительское удостоверение", "жүргізуші куәлігі"],
-          "Vehicle registration certificate": ["свидетельство о регистрации автомобиля", "көлікті тіркеу куәлігі"],
-          "Road accident documents from the police": ["документы полиции о ДТП", "полицияның ЖКО туралы құжаттары"], "Bank details": ["банковские реквизиты", "банк деректемелері"],
-          "Photos of the damage": ["фотографии повреждений", "зақымдардың фотосуреттері"], "Policy number": ["номер полиса", "полис нөмірі"],
-          "Police documents (if police was involved)": ["документы полиции, если она участвовала", "полиция қатысса, оның құжаттары"],
-          "Act from the building management company (for water damage) or fire service report (for fire)": ["акт управляющей компании при затоплении или пожарной службы при пожаре", "су басқанда басқарушы компания актісі немесе өрт кезінде өрт қызметінің актісі"],
-          "Medical certificate from the trauma centre or hospital": ["медицинская справка из травмпункта или больницы", "жарақат пунктінен немесе ауруханадан медициналық анықтама"],
-          "Medical documents from abroad": ["медицинские документы из-за границы", "шетелдегі медициналық құжаттар"],
-          "Receipts (only for expenses agreed with assistance)": ["чеки только по расходам, согласованным с ассистансом", "ассистанспен келісілген шығындардың түбіртектері"],
+        const documents: Record<string, [string, string, string]> = {
+          "ID card": ["удостоверение личности", "жеке куәлік", "kimlik belgesi"], "Driving licence": ["водительское удостоверение", "жүргізуші куәлігі", "sürücü belgesi"],
+          "Vehicle registration certificate": ["свидетельство о регистрации автомобиля", "көлікті тіркеу куәлігі", "araç tescil belgesi"],
+          "Road accident documents from the police": ["документы полиции о ДТП", "полицияның ЖКО туралы құжаттары", "polisin trafik kazası belgeleri"], "Bank details": ["банковские реквизиты", "банк деректемелері", "banka bilgileri"],
+          "Photos of the damage": ["фотографии повреждений", "зақымдардың фотосуреттері", "hasar fotoğrafları"], "Policy number": ["номер полиса", "полис нөмірі", "poliçe numarası"],
+          "Police documents (if police was involved)": ["документы полиции, если она участвовала", "полиция қатысса, оның құжаттары", "polis katıldıysa polis belgeleri"],
+          "Act from the building management company (for water damage) or fire service report (for fire)": ["акт управляющей компании при затоплении или пожарной службы при пожаре", "су басқанда басқарушы компания актісі немесе өрт кезінде өрт қызметінің актісі", "su hasarında bina yönetiminin tutanağı veya yangında itfaiye raporu"],
+          "Medical certificate from the trauma centre or hospital": ["медицинская справка из травмпункта или больницы", "жарақат пунктінен немесе ауруханадан медициналық анықтама", "acil servis veya hastaneden sağlık raporu"],
+          "Medical documents from abroad": ["медицинские документы из-за границы", "шетелдегі медициналық құжаттар", "yurt dışındaki sağlık belgeleri"],
+          "Receipts (only for expenses agreed with assistance)": ["чеки только по расходам, согласованным с ассистансом", "ассистанспен келісілген шығындардың түбіртектері", "yalnızca asistansla onaylanmış masrafların makbuzları"],
         };
-        const list = array(object(plan.facts.kb_lookup).documents).map(value => { const label = string(value), translated = documents[label]; return translated ? text(...translated) : label; }).join(", ");
-        if (list) readAnswer = text(`Нужны: ${list}. `, `Қажет құжаттар: ${list}. `);
+        const list = array(object(plan.facts.kb_lookup).documents).map(value => { const label = string(value), translated = documents[label]; return translated ? stateLanguages(state).includes("tr") ? translated[2] : text(translated[0], translated[1]) : label; }).join(", ");
+        if (list) readAnswer = text(`Нужны: ${list}. `, `Қажет құжаттар: ${list}. `, undefined, `Gerekli belgeler: ${list}. `);
       }
       output.reply = `${safety}${readAnswer}${changedAtExecution ? text("Условия изменились: ", "Шарттар өзгерді: ") : ""}${summary}. ${text("Подтверждаете?", "Растайсыз ба?", "Растайсыз ба? Ответьте «да» или «нет».")}`;
       output.facts.confirmation_required = true; return output;
@@ -392,7 +403,7 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
         catch (error) { if (!(error instanceof DomainError)) throw error; if (error.slot) delete state.slots[error.slot]; }
         const question = next.slots.required.find(key => !present(state.slots[key]));
         state.lastQuestionSlot = question ?? null;
-        output.reply += question ? ` ${defaultQuestion(input, state, question)}` : text(` Вернёмся к вопросу «${next.name}»?`, ` «${next.name}» сұрағына оралайық па?`);
+        output.reply += question ? ` ${defaultQuestion(input, state, question)}` : text(` Вернёмся к вопросу «${next.name}»?`, ` «${next.name}» сұрағына оралайық па?`, undefined, ` «${turkishScenarioName(next)}» konusuna dönelim mi?`);
         output.facts.next_scenario = nextId;
       }
     }
@@ -402,13 +413,13 @@ export async function executeTurn(input: ExecuteInput): Promise<ExecuteOutput> {
     state.pendingConfirmation = null;
     output.actions.push({ name: "scenario_validation", status: "failed", data: { scenario_id: targetId }, error: { code: error.code, message: error.message } });
     output.facts = { error: { code: error.code, message: error.message }, source_context: lookupKnowledge(dataset, targetId, state.slots) };
-    if (error.escalate) { const result = handoff(scenario.handoff?.queue ?? "operator_general", error.ru); result.reply = `${localized(state.language, error.ru, error.kk)} ${result.reply}`; return result; }
+    if (error.escalate) { const result = handoff(scenario.handoff?.queue ?? "operator_general", error.ru); result.reply = `${domainErrorText(state, error)} ${result.reply}`; return result; }
     state.lookupFailures++;
     if (state.lookupFailures >= 2 && ["not_found", "invalid_input"].includes(error.code)) {
       const result = handoff(scenario.handoff?.queue ?? "operator_general", "Repeated record lookup or slot validation failure"); return result;
     }
     if (error.slot) { delete state.slots[error.slot]; state.lastQuestionSlot = error.slot; }
-    output.reply = `${localized(state.language, error.ru, error.kk)}${error.slot ? ` ${defaultQuestion(input, state, error.slot)}` : ""}`;
+    output.reply = `${domainErrorText(state, error)}${error.slot ? ` ${defaultQuestion(input, state, error.slot)}` : ""}`;
     return output;
   } finally {
     if (state.activeScenarioId) state.slotsByScenario[state.activeScenarioId] = structuredClone(state.slots);

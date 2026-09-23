@@ -12,7 +12,7 @@ export const statusLabel = (status: Json | undefined): string => statusNames[str
 
 // This is an outcome of standard app-help steps inside an already selected SC34,
 // never a phrase-to-scenario router. Persist its result in the confirmation snapshot.
-export const appHelpFailed = (text: string): boolean => /не\s+помог|не\s+сработал|всё\s+ещ[её]\s+не|әлі\s+де\s+(?:болмай|кірмей|жұмыс\s+істеме)|көмектесп|still\s+(?:not|can(?:not|'t)|doesn['’]t|does\s+not|fail)/iu.test(text);
+export const appHelpFailed = (text: string): boolean => /не\s+помог|не\s+сработал|всё\s+ещ[её]\s+не|әлі\s+де\s+(?:болмай|кірмей|жұмыс\s+істеме)|көмектесп|still\s+(?:not|can(?:not|'t)|doesn['’]t|does\s+not|fail)|(?:^|[^\p{L}])(?:işe\s+yaramad[ıi]|yard[ıi]mc[ıi]\s+olmad[ıi]|h[âa]l[âa]\s+çal[ıi]şm[ıi]yor)(?=$|[^\p{L}])/iu.test(text);
 
 export async function planActions(context: ActionContext): Promise<ActionPlan> {
   const { dataset, scenario, sessionId, requestId, preview } = context;

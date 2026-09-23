@@ -1,6 +1,7 @@
 export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 export type JsonObject = { [key: string]: Json };
-export type Language = "ru" | "kk" | "mixed";
+export type SpokenLanguage = "ru" | "kk" | "tr";
+export type Language = SpokenLanguage | "mixed";
 export type ReplyTone = "neutral" | "calm" | "reassuring";
 export type Role = "participant" | "supervisor";
 export type Scenario = {
@@ -26,6 +27,7 @@ export type RoutingDecision = {
   scenarios: ScenarioChoice[]; alternatives: ScenarioChoice[];
   language: Language; slots: JsonObject; isContinuation: boolean;
   responseLanguage?: Language; tone?: ReplyTone;
+  inputLanguages?: SpokenLanguage[]; responseLanguages?: SpokenLanguage[];
   confirmation: "confirm" | "reject" | "none";
   reason: string; clarification: string | null;
 };
@@ -33,6 +35,7 @@ export type ActionResult = { name: string; status: "read" | "preview" | "execute
 export type PendingOperation = { id: string; scenarioId: string; actionNames: string[]; slots: JsonObject; summary: string; createdAt: string };
 export type DialogueState = {
   language: Language; activeScenarioId: string | null;
+  responseLanguages?: SpokenLanguage[];
   pendingScenarioIds: string[]; suspendedScenarioIds: string[];
   completedScenarioIds: string[]; slots: JsonObject; slotsByScenario: Record<string, JsonObject>;
   clientId: string | null; pendingConfirmation: PendingOperation | null;
@@ -44,6 +47,7 @@ export type Trace = {
   scenarios: ScenarioChoice[]; alternatives: ScenarioChoice[]; reason: string;
   language: Language; slots: JsonObject; actions: ActionResult[];
   responseLanguage?: Language; tone?: ReplyTone;
+  inputLanguages?: SpokenLanguage[]; responseLanguages?: SpokenLanguage[];
   timings: Timings; catalogHash: string; model: string;
   usage: { inputTokens: number; outputTokens: number; estimatedUsd: number };
   source: "llm" | "confirmation" | "slot" | "operator"; warnings: string[];

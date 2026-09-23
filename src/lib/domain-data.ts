@@ -21,13 +21,15 @@ const cityAliases: Record<string, string> = {
   "алматы": "Almaty", "алмата": "Almaty", "астана": "Astana", "шымкент": "Shymkent", "чимкент": "Shymkent",
   "караганда": "Karaganda", "қарағанды": "Karaganda", "актобе": "Aktobe", "ақтөбе": "Aktobe", "атырау": "Atyrau",
   "павлодар": "Pavlodar", "усть-каменогорск": "Oskemen", "өскемен": "Oskemen", "оскемен": "Oskemen",
+  "almatı": "Almaty", "şimkent": "Shymkent", "karagandı": "Karaganda", "aktöbe": "Aktobe", "öskemen": "Oskemen",
 };
 const enumAliases: Record<string, Record<string, Json>> = {
-  vehicle_type: { "легковая": "car", "легковой": "car", "автомобиль": "car", "жеңіл": "car", "грузовик": "truck", "жүк": "truck", "мотоцикл": "motorcycle" },
+  vehicle_type: { "легковая": "car", "легковой": "car", "автомобиль": "car", "жеңіл": "car", "грузовик": "truck", "жүк": "truck", "мотоцикл": "motorcycle", "otomobil": "car", "kamyon": "truck", "motosiklet": "motorcycle" },
   product_type: { "огпо": "ogpo", "каско": "casco", "дмс": "dms", "путешествие": "travel", "туризм": "travel", "имущество": "property", "несчастный случай": "accident" },
-  property_type: { "квартира": "apartment", "пәтер": "apartment", "дом": "house", "үй": "house" },
-  contact_field: { "телефон": "phone", "почта": "email", "пошта": "email", "адрес": "address", "мекенжай": "address" },
-  document_type: { "дубликат": "policy_duplicate", "копия договора": "contract_copy", "для посольства": "embassy_certificate", "справка об оплате": "payment_certificate" },
+  property_type: { "квартира": "apartment", "пәтер": "apartment", "дом": "house", "үй": "house", "daire": "apartment", "müstakil ev": "house", "ev": "house" },
+  contact_field: { "телефон": "phone", "почта": "email", "пошта": "email", "адрес": "address", "мекенжай": "address", "telefon": "phone", "e-posta": "email", "adres": "address" },
+  document_type: { "дубликат": "policy_duplicate", "копия договора": "contract_copy", "для посольства": "embassy_certificate", "справка об оплате": "payment_certificate", "poliçe kopyası": "policy_duplicate", "sözleşme kopyası": "contract_copy", "elçilik belgesi": "embassy_certificate", "ödeme belgesi": "payment_certificate" },
+  package: { "standart": "Standard", "lite": "Lite" },
 };
 
 export function addDays(date: string, days: number): string { const d = new Date(`${date}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); }
@@ -53,18 +55,18 @@ export function normalizeSlot(def: SlotDefinition, raw: Json, today: string): Js
     if (def.name.endsWith("vehicle_plate")) value = value.replace(/[АВЕКМНОРСТУХ]/g, c => ({ А: "A", В: "B", Е: "E", К: "K", М: "M", Н: "H", О: "O", Р: "P", С: "C", Т: "T", У: "Y", Х: "X" } as Record<string, string>)[c]);
   }
   else if (def.name === "city") value = cityAliases[lower] ?? value;
-  else if (def.name === "region") value = /алмат|almat/.test(lower) ? "almaty" : /астан|astan/.test(lower) ? "astana" : /other|друг|басқа/.test(lower) ? "other" : value;
+  else if (def.name === "region") value = /алмат|almat/.test(lower) ? "almaty" : /астан|astan/.test(lower) ? "astana" : /other|друг|басқа|başka/.test(lower) ? "other" : value;
   else if (def.name === "doctor_specialty") {
     const specialties: Record<string, string> = { "терапевт": "therapist", "терапевту": "therapist", "лор": "ENT", "отоларинголог": "ENT", "стоматолог": "dentist", "тіс дәрігері": "dentist", "гинеколог": "gynecologist", "кардиолог": "cardiologist", "педиатр": "pediatrician", "анализы": "lab", "талдау": "lab", "узи": "ultrasound", "удз": "ultrasound" };
     value = specialties[lower] ?? value;
   }
   else if (def.type === "date") {
-    const shifts: Record<string, number> = { "сегодня": 0, "бүгін": 0, "today": 0, "завтра": 1, "ертең": 1, "tomorrow": 1, "вчера": -1, "кеше": -1, "yesterday": -1, "послезавтра": 2, "бүрсігүні": 2 };
+    const shifts: Record<string, number> = { "сегодня": 0, "бүгін": 0, "today": 0, "bugün": 0, "завтра": 1, "ертең": 1, "tomorrow": 1, "yarın": 1, "вчера": -1, "кеше": -1, "yesterday": -1, "dün": -1, "послезавтра": 2, "бүрсігүні": 2, "öbür gün": 2 };
     if (lower in shifts) value = addDays(today, shifts[lower]);
     else if (/^\d{2}\.\d{2}\.\d{4}$/.test(text)) value = text.split(".").reverse().join("-");
   } else if (def.type === "boolean" && typeof value === "string") {
-    if (/^(true|да|есть|иә|бар)$/.test(lower)) value = true;
-    if (/^(false|нет|жоқ)$/.test(lower)) value = false;
+    if (/^(true|да|есть|иә|бар|evet|var)$/.test(lower)) value = true;
+    if (/^(false|нет|жоқ|hayır|yok)$/.test(lower)) value = false;
   } else if (def.type === "integer" || def.values?.every(v => typeof v === "number")) {
     if (typeof value === "string" && /^\d[\d\s,]*$/.test(text)) value = Number(text.replace(/[\s,]/g, ""));
   } else if (def.type === "list" && typeof value === "string") value = text.split(/[,;\s]+/).filter(Boolean);

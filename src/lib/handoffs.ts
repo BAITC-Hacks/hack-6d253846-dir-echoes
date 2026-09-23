@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { ApiError, type Viewer } from "./auth";
 import { transaction } from "./db";
 import { asHandoff, redact, sessionRow } from "./repository";
+import { languagePhrase, stateLanguages } from "./languages";
 import type { Handoff, Trace } from "./types";
 
 type OperatorCommand = { status: "active" | "closed"; message?: string; requestId: string };
@@ -37,14 +38,17 @@ export async function updateHandoff(id: string, viewer: Viewer, command: Operato
     if (command.status === "closed") {
       await sql.query("UPDATE sessions SET state=jsonb_set(state,'{status}','\"closed\"'::jsonb),version=version+1,updated_at=now() WHERE id=$1", [sessionId]);
     }
-    const statusMessage = session.state.language === "kk"
-      ? command.status === "closed" ? "Оператор өтінішті аяқтады." : "Оператор өтінішті қабылдады."
-      : command.status === "closed" ? "Оператор завершил обращение." : "Оператор принял обращение в работу.";
+    const responseLanguages = stateLanguages(session.state);
+    const statusMessage = command.status === "closed"
+      ? languagePhrase(responseLanguages, { ru: "Оператор завершил обращение.", kk: "Оператор өтінішті аяқтады.", tr: "Operatör talebi tamamladı.", ru_kk: "Оператор обращение аяқтады.", ru_tr: "Оператор talebi tamamladı.", kk_tr: "Оператор өтінішті tamamladı." })
+      : languagePhrase(responseLanguages, { ru: "Оператор принял обращение в работу.", kk: "Оператор өтінішті қабылдады.", tr: "Operatör talebi işleme aldı.", ru_kk: "Оператор обращение қабылдады.", ru_tr: "Оператор talebi işleme aldı.", kk_tr: "Оператор өтінішті işleme aldı." });
     const reply = [changed ? statusMessage : "", message].filter(Boolean).join("\n\n");
     if (reply) {
       const trace: Trace = {
-        scenarios: [], alternatives: [], reason: changed ? "Изменение статуса обращения оператором" : "Ответ оператора",
-        language: session.state.language, slots: { handoffId: id, status: command.status }, actions: [],
+        scenarios: [], alternatives: [], reason: changed
+          ? languagePhrase(responseLanguages, { ru: "Изменение статуса обращения оператором", kk: "Оператор өтініш мәртебесін өзгертті", tr: "Operatör talebin durumunu değiştirdi.", ru_tr: "Статус обращения operatör tarafından değiştirildi.", kk_tr: "Өтініш мәртебесі operatör tarafından değiştirildi." })
+          : languagePhrase(responseLanguages, { ru: "Ответ оператора", kk: "Оператор жауабы", tr: "Operatör yanıtı", ru_tr: "Ответ оператора: operatör yanıtı", kk_tr: "Оператор жауабы: operatör yanıtı" }),
+        language: session.state.language, responseLanguage: session.state.language, responseLanguages, slots: { handoffId: id, status: command.status }, actions: [],
         timings: { stt: null, router: 0, executor: 0, response: 0, serverTotal: 0 }, catalogHash: "", model: "human",
         usage: { inputTokens: 0, outputTokens: 0, estimatedUsd: 0 }, source: "operator", warnings: [],
       };

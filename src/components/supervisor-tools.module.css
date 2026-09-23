@@ -99,3 +99,56 @@
   .latencyTable, .latencyTable th { font-size: 14px; }
   .latencyTable th, .latencyTable td { padding: 12px 10px; }
 }
+/* Locally scoped surfaces for the application dark theme. */
+:global(html[data-theme="dark"]) .dashboard { color: var(--ink); background: var(--surface); border-color: var(--line); }
+:global(html[data-theme="dark"]) .title,
+:global(html[data-theme="dark"]) .section h3,
+:global(html[data-theme="dark"]) .sectionHeading h3,
+:global(html[data-theme="dark"]) .revisionList strong,
+:global(html[data-theme="dark"]) .utterance,
+:global(html[data-theme="dark"]) .dialogHeader h2 { color: var(--ink); }
+:global(html[data-theme="dark"]) .hint,
+:global(html[data-theme="dark"]) .loading,
+:global(html[data-theme="dark"]) .metric > span,
+:global(html[data-theme="dark"]) .metric > small,
+:global(html[data-theme="dark"]) .sectionHeading time,
+:global(html[data-theme="dark"]) .revisionList time,
+:global(html[data-theme="dark"]) .revisionList p,
+:global(html[data-theme="dark"]) .noReviews { color: var(--muted); }
+:global(html[data-theme="dark"]) .metric,
+:global(html[data-theme="dark"]) .section,
+:global(html[data-theme="dark"]) .review,
+:global(html[data-theme="dark"]) .dialog { background: var(--surface); border-color: var(--line); color: var(--ink); }
+:global(html[data-theme="dark"]) .metric > strong,
+:global(html[data-theme="dark"]) .errorList strong,
+:global(html[data-theme="dark"]) .noReviews svg { color: var(--theme-accent); }
+:global(html[data-theme="dark"]) .methodology { color: var(--theme-soft-text); background: #23312c; border-left-color: #81b794; }
+:global(html[data-theme="dark"]) .reviewNote { color: #c1d2dc; background: #24333d; }
+:global(html[data-theme="dark"]) .errorList,
+:global(html[data-theme="dark"]) .revisionList,
+:global(html[data-theme="dark"]) .editorBody,
+:global(html[data-theme="dark"]) .tableScroll { scrollbar-color: #60717b transparent; }
+:global(html[data-theme="dark"]) .errorList li,
+:global(html[data-theme="dark"]) .revisionList li,
+:global(html[data-theme="dark"]) .dialogHeader,
+:global(html[data-theme="dark"]) .dialogFooter { border-color: var(--line); }
+:global(html[data-theme="dark"]) .errorList li { color: #c3d5df; }
+:global(html[data-theme="dark"]) .match,
+:global(html[data-theme="dark"]) .success { color: #c1e9cf; background: #233d2c; border-color: #4c7659; }
+:global(html[data-theme="dark"]) .correction { color: #f1d29c; background: var(--theme-warning-bg); border-color: var(--theme-warning-line); }
+:global(html[data-theme="dark"]) .form label { color: #d0e0e8; }
+:global(html[data-theme="dark"]) .form input,
+:global(html[data-theme="dark"]) .form select,
+:global(html[data-theme="dark"]) .form textarea { color: var(--ink); background: #13232d; border-color: #577180; }
+:global(html[data-theme="dark"]) .form input:focus,
+:global(html[data-theme="dark"]) .form select:focus,
+:global(html[data-theme="dark"]) .form textarea:focus { outline-color: #96c9a5; }
+:global(html[data-theme="dark"]) .form :disabled { opacity: 1; color: #a7bbc7; }
+:global(html[data-theme="dark"]) .dialogFooter { background: #202f37; }
+:global(html[data-theme="dark"]) .rule { background: #202e38; border-color: #466170; }
+:global(html[data-theme="dark"]) .backdrop { background: #050b0fe0; }
+:global(html[data-theme="dark"]) .dialog { box-shadow: 0 20px 70px #0009; }
+:global(html[data-theme="dark"]) .latencyTable { color: #d2e2eb; }
+:global(html[data-theme="dark"]) .latencyTable th { color: #bfd4df; background: #253741; }
+:global(html[data-theme="dark"]) .latencyTable th,
+:global(html[data-theme="dark"]) .latencyTable td { border-color: #415c6b; }

@@ -112,8 +112,13 @@ export function duration(ms: number | null | undefined) {
   return ms < 1000 ? `${Math.round(ms)} мс` : `${(ms / 1000).toFixed(2)} с`;
 }
 
-export function languageLabel(language?: string) {
-  return language === "kk" ? "Қазақша" : language === "mixed" ? "RU + KZ" : "Русский";
+export function languageLabel(language?: string, languages?: readonly string[]) {
+  const names: Record<string, string> = { ru: "Русский", kk: "Қазақша", tr: "Türkçe" };
+  if (language === "mixed") {
+    const detected = [...new Set((languages ?? []).filter(value => value in names))];
+    return (detected.length > 1 ? detected : ["ru", "kk"]).map(value => names[value]).join(" + ");
+  }
+  return language ? names[language] ?? language : "Не определён";
 }
 
 export function sessionStatus(status: string) {

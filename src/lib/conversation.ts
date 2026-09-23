@@ -4,6 +4,7 @@ import { query, transaction, consumeLimit } from "./db";
 import { getDataset } from "./dataset";
 import { routeUtterance, composeReply, shouldComposeReply } from "./ai";
 import { executeTurn } from "./domain";
+import { languagePhrase, stateLanguages } from "./languages";
 import { entityStore, getSessionDetail, sessionRow, putHandoff, redact } from "./repository";
 import type { ChatEntry, ExecuteOutput, Trace } from "./types";
 
@@ -33,11 +34,12 @@ export async function processTurn(sessionId: string, viewer: Viewer, input: {tex
     prior=await getSessionDetail(sessionId,viewer);
     const history:ChatEntry[]=prior.turns.slice(-10).flatMap(turn=>[{role:"user" as const,content:turn.userText},{role:"assistant" as const,content:turn.assistantText}]);
     if(prior.session.state.status==="handoff") {
-      const trace:Trace={scenarios:[],alternatives:[],reason:"Сообщение клиента сохранено в обращении для оператора",language:prior.session.state.language,slots:{},actions:[],timings:{stt:input.sttMs??null,router:0,executor:0,response:0,serverTotal:Math.round(performance.now()-started)},catalogHash:dataset.hash,model:"operator_queue",usage:{inputTokens:0,outputTokens:0,estimatedUsd:0},source:"operator",warnings:[]};
+      const responseLanguages=stateLanguages(prior.session.state);
+      const trace:Trace={scenarios:[],alternatives:[],reason:languagePhrase(responseLanguages,{ru:"Сообщение клиента сохранено в обращении для оператора",kk:"Клиент хабарламасы оператор өтінішінде сақталды",tr:"Müşterinin mesajı operatörün talebine kaydedildi.",ru_tr:"Сообщение клиента operatörün talebine kaydedildi.",kk_tr:"Клиент хабарламасы operatörün talebine kaydedildi."}),language:prior.session.state.language,responseLanguage:prior.session.state.language,inputLanguages:responseLanguages,responseLanguages,slots:{},actions:[],timings:{stt:input.sttMs??null,router:0,executor:0,response:0,serverTotal:Math.round(performance.now()-started)},catalogHash:dataset.hash,model:"operator_queue",usage:{inputTokens:0,outputTokens:0,estimatedUsd:0},source:"operator",warnings:[]};
       await transaction(async sql=>{
         const current=await sessionRow(sessionId,viewer,sql,true);
         if(current.busy_token!==turnId || current.version!==prior.session.version || current.state.status!=="handoff") throw new ApiError(409,"Состояние обращения изменилось. Обновите историю перед следующей репликой.");
-        const acknowledgement=current.state.language==="kk"?"Хабарлама өтініште сақталды. Оператор оны сөйлесу тарихынан көреді.":"Сообщение сохранено в обращении. Оператор увидит его в истории.";
+        const acknowledgement=languagePhrase(stateLanguages(current.state),{ru:"Сообщение сохранено в обращении. Оператор увидит его в истории.",kk:"Хабарлама өтініште сақталды. Оператор оны сөйлесу тарихынан көреді.",tr:"Mesajınız talebe kaydedildi. Operatör konuşma geçmişinde görebilir.",ru_kk:"Сообщение сохранено в обращении. Оператор оны сөйлесу тарихынан көреді.",ru_tr:"Сообщение сохранено в обращении. Operatör konuşma geçmişinde görebilir.",kk_tr:"Хабарлама өтініште сақталды. Operatör konuşma geçmişinde görebilir."});
         await sql.query("UPDATE turns SET assistant_text=$2,trace=$3::jsonb,status='completed' WHERE id=$1",[turnId,acknowledgement,JSON.stringify(trace)]);
         await sql.query("UPDATE sessions SET version=version+1,updated_at=now() WHERE id=$1",[sessionId]);
         await sql.query("UPDATE handoffs SET summary=right(summary || $2,6000),updated_at=now() WHERE session_id=$1 AND status<>'closed'",[sessionId,redact(`\nКлиент: ${input.text}`)]);
@@ -56,7 +58,7 @@ export async function processTurn(sessionId: string, viewer: Viewer, input: {tex
       // LLM and speech calls remain outside this transaction.
       await sql.query("SELECT pg_advisory_xact_lock(684217391)");
       execution=await executeTurn({dataset,state:structuredClone(current.state),decision:routed.decision,text:input.text,store:entityStore(sql),sessionId,requestId:input.requestId});
-      trace={scenarios:routed.decision.scenarios,alternatives:routed.decision.alternatives,reason:routed.decision.reason,language:routed.decision.language,responseLanguage:routed.decision.responseLanguage,tone:routed.decision.tone,slots:routed.decision.slots,actions:execution.actions,
+      trace={scenarios:routed.decision.scenarios,alternatives:routed.decision.alternatives,reason:routed.decision.reason,language:routed.decision.language,responseLanguage:routed.decision.responseLanguage,inputLanguages:routed.decision.inputLanguages,responseLanguages:routed.decision.responseLanguages,tone:routed.decision.tone,slots:routed.decision.slots,actions:execution.actions,
         timings:{stt:input.mode==="voice"?input.sttMs??null:null,router:routed.elapsedMs,executor:Math.round(performance.now()-executionStart),response:0,serverTotal:Math.round(performance.now()-started)},
         catalogHash:dataset.hash,model:routed.model,usage:{inputTokens:routed.inputTokens,outputTokens:routed.outputTokens,estimatedUsd:routed.estimatedUsd},source:routed.source||"llm",warnings:execution.warnings};
       if(execution.handoff) await putHandoff(sql,sessionId,execution.handoff.queue,execution.handoff.reason,redact([...history.slice(-6).map(t=>`${t.role}: ${t.content}`),`user: ${input.text}`,`assistant: ${execution.reply}`].join("\n")).slice(0,6000));

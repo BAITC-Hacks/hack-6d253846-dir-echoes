@@ -1,6 +1,7 @@
 import { normalizeSlot } from "./domain-data";
 import { effectiveSlots } from "./routing-slots";
-import type { Dataset, DialogueState, Json, Language, RouterOutput, SlotDefinition } from "./types";
+import { languageFromList, languagePhrase, spokenLanguages, stateLanguages } from "./languages";
+import type { Dataset, DialogueState, Json, Language, RouterOutput, SlotDefinition, SpokenLanguage } from "./types";
 
 // Complete slot labels, never utterance-to-scenario rules. All targets must also
 // exist in the current catalog's values before this path can accept them.
@@ -90,8 +91,8 @@ function atomicValue(def: SlotDefinition, text: string, businessDate: string): J
 }
 
 /** Continue an already selected scenario. This function never selects a new intent. */
-export function tryFastPath({ dataset, state, text, responseLanguage = state.language }: {
-  dataset: Dataset; state: DialogueState; text: string; responseLanguage?: Language;
+export function tryFastPath({ dataset, state, text, responseLanguage = state.language, responseLanguages }: {
+  dataset: Dataset; state: DialogueState; text: string; responseLanguage?: Language; responseLanguages?: SpokenLanguage[];
 }): RouterOutput | null {
   const started = performance.now();
   if (state.status !== "active" || !state.activeScenarioId) return null;
@@ -102,15 +103,22 @@ export function tryFastPath({ dataset, state, text, responseLanguage = state.lan
   let confirmation: "confirm" | "reject" | "none" = "none";
   let slots: Record<string, Json> = {};
   let reason: string;
+  let inputLanguages = stateLanguages(state);
+  const replyLanguages = spokenLanguages(responseLanguage, responseLanguages ?? state.responseLanguages);
   if (state.pendingConfirmation) {
     if (state.pendingConfirmation.scenarioId !== scenario.scenario_id || state.lastQuestionSlot) return null;
-    const answer = /^(да|иә|нет|жоқ)[.!]?$/iu.exec(value)?.[1].toLowerCase();
+    const answer = /^(да|иә|нет|жоқ|evet|hayır|hayir)[.!]?$/iu.exec(value)?.[1].toLocaleLowerCase("tr");
     if (!answer) return null;
-    confirmation = answer === "да" || answer === "иә" ? "confirm" : "reject";
+    confirmation = answer === "да" || answer === "иә" || answer === "evet" ? "confirm" : "reject";
+    inputLanguages = [answer === "да" || answer === "нет" ? "ru" : answer === "иә" || answer === "жоқ" ? "kk" : "tr"];
     source = "confirmation";
-    reason = responseLanguage === "kk"
-      ? confirmation === "confirm" ? "Көрсетілген әрекет нақты расталды." : "Көрсетілген әрекеттен бас тартылды."
-      : confirmation === "confirm" ? "Точное подтверждение показанного действия." : "Точный отказ от показанного действия.";
+    reason = confirmation === "confirm" ? languagePhrase(replyLanguages, {
+      ru: "Точное подтверждение показанного действия.", kk: "Көрсетілген әрекет нақты расталды.", tr: "Gösterilen işlem açıkça onaylandı.",
+      ru_kk: "Көрсетілген әрекет — точное подтверждение.", ru_tr: "Показанное действие açıkça onaylandı.", kk_tr: "Көрсетілген әрекет açıkça onaylandı.", ru_kk_tr: "Подтверждение: көрсетілген әрекет açıkça onaylandı.",
+    }) : languagePhrase(replyLanguages, {
+      ru: "Точный отказ от показанного действия.", kk: "Көрсетілген әрекеттен бас тартылды.", tr: "Gösterilen işlem açıkça reddedildi.",
+      ru_kk: "Көрсетілген әрекет — точный отказ.", ru_tr: "Показанное действие açıkça reddedildi.", kk_tr: "Көрсетілген әрекет açıkça reddedildi.", ru_kk_tr: "Отказ: көрсетілген әрекет açıkça reddedildi.",
+    });
   } else {
     if (!state.lastQuestionSlot) return null;
     const definition = effectiveSlots(dataset).find(slot => slot.name === state.lastQuestionSlot);
@@ -119,11 +127,12 @@ export function tryFastPath({ dataset, state, text, responseLanguage = state.lan
     if (normalized === undefined) return null;
     slots = { [definition.name]: normalized };
     source = "slot";
-    reason = responseLanguage === "kk" ? "Сұралған бір өрістің мәні каталог ережелерімен тексерілді." : "Значение одного запрошенного поля проверено по правилам каталога.";
+    reason = languagePhrase(replyLanguages, { ru: "Значение одного запрошенного поля проверено по правилам каталога.", kk: "Сұралған бір өрістің мәні каталог ережелерімен тексерілді.", tr: "İstenen tek alanın değeri katalog kurallarına göre doğrulandı.",
+      ru_kk: "Сұралған өріс проверен по правилам каталога.", ru_tr: "Значение запрошенного поля katalog kurallarına göre doğrulandı.", kk_tr: "Сұралған өрістің мәні katalog kurallarına göre doğrulandı.", ru_kk_tr: "Значение поля: сұралған дерек katalog kurallarına göre doğrulandı." });
   }
   return {
     decision: { scenarios: [{ scenarioId: scenario.scenario_id, confidence: 1, reason }], alternatives: [],
-      language: state.language, responseLanguage, tone: "neutral", slots, isContinuation: true, confirmation, reason, clarification: null },
+      language: languageFromList(inputLanguages), inputLanguages, responseLanguage: languageFromList(replyLanguages), responseLanguages: replyLanguages, tone: "neutral", slots, isContinuation: true, confirmation, reason, clarification: null },
     source, model: "state-fast-path", elapsedMs: Number((performance.now() - started).toFixed(3)), inputTokens: 0, outputTokens: 0, estimatedUsd: 0,
   };
 }
