@@ -20,3 +20,6 @@ private/
 tmp/
 test-results/
 playwright-report/
+.data/
+reports/
+

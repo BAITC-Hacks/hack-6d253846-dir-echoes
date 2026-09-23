@@ -1,0 +1,11 @@
+.env*
+.data/
+reports/
+private/
+data/
+tmp/
+tests/
+*.key
+*.pem
+*.log
+*.tsbuildinfo
