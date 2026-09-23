@@ -2,13 +2,14 @@ import { randomUUID } from "node:crypto";
 import { query, type Sql } from "./db";
 import { ApiError, type Viewer } from "./auth";
 import { redactPersonalText } from "./privacy";
+import { asSessionLive, getSessionPresence, type PresenceRow } from "./presence";
 import type { DialogueState, EntityStore, Handoff, JsonObject, Session, SessionDetail, Trace, Turn } from "./types";
 
-type SessionRow = { id: string; owner_id: string; title: string; state: DialogueState; version: number; created_at: Date | string; updated_at: Date | string; turn_count?: string | number; busy_token?: string; busy_until?: Date | string };
+type SessionRow = PresenceRow & { id: string; owner_id: string; title: string; state: DialogueState; version: number; created_at: Date | string; updated_at: Date | string; turn_count?: string | number; busy_token?: string; busy_until?: Date | string };
 type TurnRow = { id: string; session_id: string; request_id: string; user_text: string; assistant_text: string; mode: Turn["mode"]; trace: Trace; created_at: Date | string };
 type HandoffRow = { id: string; session_id: string; queue: string; reason: string; summary: string; status: Handoff["status"]; created_at: Date | string; updated_at: Date | string };
 const iso = (date: Date | string) => new Date(date).toISOString();
-export function asSession(row: SessionRow): Session { return { id: row.id, title: row.title, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at), state: row.state, version: row.version, turnCount: Number(row.turn_count || 0) }; }
+export function asSession(row: SessionRow): Session { return { id: row.id, title: row.title, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at), state: row.state, version: row.version, turnCount: Number(row.turn_count || 0), live: row.state.status === "active" ? asSessionLive(row) : null }; }
 export function asHandoff(row: HandoffRow): Handoff { return { id: row.id, sessionId: row.session_id, queue: row.queue, reason: row.reason, summary: row.summary, status: row.status, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }; }
 export async function sessionRow(id: string, viewer: Viewer, sql: Sql = { query }, forUpdate = false) {
   const result = await sql.query<SessionRow>(`SELECT * FROM sessions WHERE id=$1 ${forUpdate ? "FOR UPDATE" : ""}`, [id]);
@@ -17,20 +18,23 @@ export async function sessionRow(id: string, viewer: Viewer, sql: Sql = { query 
   return row;
 }
 export async function listSessions(viewer: Viewer) {
-  const result = await query<SessionRow>(`SELECT s.*, (SELECT count(*) FROM turns t WHERE t.session_id=s.id AND t.status='completed') AS turn_count
-    FROM sessions s WHERE ($1='supervisor' OR s.owner_id=$2) ORDER BY s.updated_at DESC LIMIT 100`, [viewer.role, viewer.id]);
+  const result = await query<SessionRow>(`SELECT s.*, p.phase AS live_phase,p.last_seen_at AS live_seen_at,p.expires_at AS live_expires_at,
+    (SELECT count(*) FROM turns t WHERE t.session_id=s.id AND t.status='completed') AS turn_count
+    FROM sessions s LEFT JOIN session_presence p ON p.session_id=s.id AND p.expires_at>now() AND s.state->>'status'='active'
+    WHERE ($1='supervisor' OR s.owner_id=$2) ORDER BY s.updated_at DESC LIMIT 100`, [viewer.role, viewer.id]);
   return result.rows.map(asSession);
 }
 export async function getSessionDetail(id: string, viewer: Viewer): Promise<SessionDetail> {
   const row = await sessionRow(id,viewer);
   // Recover a durable action/fallback if a server process stopped during wording.
   if(!row.busy_until || new Date(row.busy_until).getTime()<=Date.now()) await query("UPDATE turns SET status='completed' WHERE session_id=$1 AND status='finalizing' AND EXISTS (SELECT 1 FROM sessions WHERE id=$1 AND (busy_until IS NULL OR busy_until<=now()))",[id]);
-  const [result,handoffs] = await Promise.all([
+  const [result,handoffs,live] = await Promise.all([
     query<TurnRow>("SELECT * FROM turns WHERE session_id=$1 AND status='completed' ORDER BY created_at,id",[id]),
-    query<HandoffRow>("SELECT * FROM handoffs WHERE session_id=$1 ORDER BY created_at DESC",[id])
+    query<HandoffRow>("SELECT * FROM handoffs WHERE session_id=$1 ORDER BY created_at DESC",[id]),
+    getSessionPresence(id)
   ]);
   const turns: Turn[] = result.rows.map(t => ({ id:t.id,sessionId:t.session_id,requestId:t.request_id,userText:t.user_text,assistantText:t.assistant_text,trace:t.trace,mode:t.mode,createdAt:iso(t.created_at) }));
-  return {session:{...asSession(row),turnCount:turns.length},turns,handoffs:handoffs.rows.map(asHandoff)};
+  return {session:{...asSession(row),turnCount:turns.length,live},turns,handoffs:handoffs.rows.map(asHandoff)};
 }
 export async function listHandoffs(viewer: Viewer) {
   if (viewer.role !== "supervisor") return [];

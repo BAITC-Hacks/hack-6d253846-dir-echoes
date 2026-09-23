@@ -18,6 +18,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS sessions_owner ON sessions(owner_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS session_presence (
+  session_id text PRIMARY KEY REFERENCES sessions(id),
+  phase text NOT NULL CHECK(phase IN ('listening','processing','replying')),
+  last_seen_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz NOT NULL
+);
 CREATE TABLE IF NOT EXISTS turns (
   id text PRIMARY KEY, session_id text NOT NULL REFERENCES sessions(id), request_id text NOT NULL,
   user_text text NOT NULL, assistant_text text NOT NULL DEFAULT '', mode text NOT NULL,

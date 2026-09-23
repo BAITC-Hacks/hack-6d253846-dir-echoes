@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Headphones, Mic, MicOff, Phone, PhoneOff, Volume2 } from "lucide-react";
 import type { Role } from "@/lib/types";
 import { api, readableError } from "./workspace-ui";
@@ -20,7 +20,7 @@ async function gatherIce(peer:RTCPeerConnection) {
 }
 
 /** Real peer audio: no speech generation, recording or automatic microphone access. */
-export function OperatorVoiceControls({sessionId,role,enabled}:{sessionId:string;role:Role;enabled:boolean}) {
+export function OperatorVoiceControls({sessionId,role,enabled,prepareCall,conversationTopic}:{sessionId:string;role:Role;enabled:boolean;prepareCall?:()=>Promise<boolean>;conversationTopic?:string}) {
   const [signal,setSignal]=useState<Signal|null>(null);
   const [state,setState]=useState<VoiceState>("idle");
   const [muted,setMuted]=useState(false);
@@ -29,6 +29,8 @@ export function OperatorVoiceControls({sessionId,role,enabled}:{sessionId:string
   const peerRef=useRef<RTCPeerConnection|null>(null);
   const streamRef=useRef<MediaStream|null>(null);
   const audioRef=useRef<HTMLAudioElement|null>(null);
+  const confirmRef=useRef<HTMLDialogElement|null>(null);
+  const confirmTitle=useId();
   const callIdRef=useRef<string|null>(null);
   const pendingCallIdRef=useRef<string|null>(null);
   const generation=useRef(0);
@@ -83,6 +85,8 @@ export function OperatorVoiceControls({sessionId,role,enabled}:{sessionId:string
     starting.current=true;setError(null);setMuted(false);setPlayBlocked(false);setState("microphone");
     const revision=++generation.current;
     try{
+      if(prepareCall&&!await prepareCall())throw new Error("Не удалось принять разговор. Повторите подключение после обновления данных.");
+      if(revision!==generation.current)return;
       if(!navigator.mediaDevices?.getUserMedia||typeof RTCPeerConnection==="undefined")throw new Error("Голосовой звонок недоступен в этом браузере. Откройте сайт в современном браузере по HTTPS.");
       const latest=await api<Signal>(endpoint);
       if(revision!==generation.current)return;
@@ -129,7 +133,7 @@ export function OperatorVoiceControls({sessionId,role,enabled}:{sessionId:string
   }
 
   const inProgress=state==="microphone"||state==="connecting"||state==="ringing"||state==="connected";
-  const canJoin=enabled&&(role==="supervisor"?signal?.canOffer:signal?.status==="offered");
+  const canJoin=enabled&&(role==="supervisor"?signal?.canOffer||Boolean(prepareCall):signal?.status==="offered");
   const status=state==="connected"?"Голосовое соединение установлено":state==="microphone"?"Разрешите микрофон…":state==="connecting"?"Соединяем микрофоны…":state==="ringing"?"Ждём, пока клиент примет звонок":!enabled?"Ожидаем подключения оператора":role==="participant"&&signal?.status==="offered"?"Оператор приглашает вас в голосовой разговор":role==="supervisor"?"Начните голосовое подключение к клиенту":"Оператор подключён к обращению. Ожидаем голосовой звонок.";
-  return <section className={styles.panel} aria-label="Голос с оператором"><div className={styles.heading}><Headphones size={18}/><span>Разговор с {role==="supervisor"?"клиентом":"оператором"}</span><i className={`${styles.dot} ${state==="connected"?styles.connected:""}`}/></div><p className={styles.status} role="status">{status}</p><div className={styles.actions}>{!inProgress?<button className={styles.primary} disabled={!canJoin} onClick={()=>void start()}><Phone size={16}/>{role==="supervisor"?"Позвонить клиенту":"Принять звонок"}</button>:<><button onClick={()=>{const next=!muted;streamRef.current?.getAudioTracks().forEach(track=>{track.enabled=!next;});setMuted(next);}} disabled={!streamRef.current}>{muted?<MicOff size={16}/>:<Mic size={16}/>} {muted?"Включить микрофон":"Выключить микрофон"}</button><button className={styles.end} onClick={()=>end()}><PhoneOff size={16}/>Завершить звонок</button></>}{playBlocked&&<button onClick={()=>void audioRef.current?.play().then(()=>setPlayBlocked(false)).catch(()=>setError("Нажмите воспроизведение в плеере ниже."))}><Volume2 size={16}/>Включить звук</button>}</div>{!inProgress&&signal?.canEnd&&signal.callId&&<div className={styles.actions}><button onClick={()=>{callIdRef.current=signal.callId;end();}}>Сбросить прошлое голосовое соединение</button></div>}<audio className={styles.audio} ref={audioRef} autoPlay controls playsInline aria-label="Голос собеседника" hidden={!inProgress}/>{error&&<p className={styles.error} role="alert">{error}</p>}<p className={styles.foot}>Микрофон включается по нажатию. Голос не записывается; текстовая история сохраняется.</p></section>;
+  return <section className={styles.panel} aria-label="Голос с оператором"><div className={styles.heading}><Headphones size={18}/><span>Разговор с {role==="supervisor"?"клиентом":"оператором"}</span><i className={`${styles.dot} ${state==="connected"?styles.connected:""}`}/></div><p className={styles.status} role="status">{status}</p><div className={styles.actions}>{!inProgress?<button className={styles.primary} disabled={!canJoin} onClick={()=>role==="supervisor"?confirmRef.current?.showModal():void start()}><Phone size={16}/>{role==="supervisor"?prepareCall?"Принять и позвонить":"Позвонить клиенту":"Принять звонок"}</button>:<><button onClick={()=>{const next=!muted;streamRef.current?.getAudioTracks().forEach(track=>{track.enabled=!next;});setMuted(next);}} disabled={!streamRef.current}>{muted?<MicOff size={16}/>:<Mic size={16}/>} {muted?"Включить микрофон":"Выключить микрофон"}</button><button className={styles.end} onClick={()=>end()}><PhoneOff size={16}/>Завершить звонок</button></>}{playBlocked&&<button onClick={()=>void audioRef.current?.play().then(()=>setPlayBlocked(false)).catch(()=>setError("Нажмите воспроизведение в плеере ниже."))}><Volume2 size={16}/>Включить звук</button>}</div>{!inProgress&&signal?.canEnd&&signal.callId&&<div className={styles.actions}><button onClick={()=>{callIdRef.current=signal.callId;end();}}>Сбросить прошлое голосовое соединение</button></div>}<audio className={styles.audio} ref={audioRef} autoPlay controls playsInline aria-label="Голос собеседника" hidden={!inProgress}/>{error&&<p className={styles.error} role="alert">{error}</p>}{role==="supervisor"&&<dialog ref={confirmRef} className={styles.confirm} aria-labelledby={confirmTitle}><div className={styles.confirmIcon}><Phone size={24}/></div><h3 id={confirmTitle}>Подключиться к клиенту?</h3><span className={styles.confirmLabel}>Тема обращения</span><p className={styles.confirmTopic}>{conversationTopic||"Клиент ещё не обозначил тему"}</p><p className={styles.confirmText}>{prepareCall?"Вы примете обращение и остановите ответы AI. ":""}Клиент получит приглашение и сам подтвердит голосовой звонок.</p><div className={styles.actions}><button onClick={()=>confirmRef.current?.close()}>Отмена</button><button className={styles.primary} disabled={!canJoin||inProgress} onClick={()=>{confirmRef.current?.close();void start();}}><Phone size={16}/>Подтвердить и позвонить</button></div></dialog>}<p className={styles.foot}>Микрофон включается по нажатию. Голос не записывается; текстовая история сохраняется.</p></section>;
 }

@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDownToLine, ArrowRight, AudioLines, BookOpen, Check, ChevronRight, CircleHelp, GitBranch, Headphones, History, LockKeyhole, LogOut, Menu, MessageSquare, Mic, Moon, Phone, PhoneOff, Plus, RefreshCw, ShieldCheck, Square, Sun, Volume2, VolumeX, X } from "lucide-react";
-import type { Role, SessionDetail, Turn } from "@/lib/types";
+import { ArrowDownToLine, ArrowRight, AudioLines, BookOpen, ChevronRight, CircleHelp, GitBranch, Headphones, History, LockKeyhole, LogOut, Menu, MessageSquare, Mic, Moon, Phone, PhoneOff, Plus, RefreshCw, ShieldCheck, Square, Sun, Volume2, VolumeX, X } from "lucide-react";
+import type { PresencePhase, Role, SessionDetail, Turn } from "@/lib/types";
 import { createAudioPlayback, createPersistentAudio, unlockAudioPlayback } from "@/lib/audio-playback";
 import { useVoiceCall } from "@/lib/use-voice-call";
 import { usePlaybackMeter } from "@/lib/use-playback-meter";
@@ -13,6 +13,7 @@ import { BackgroundStarfield } from "./background-starfield";
 import { ConversationContext } from "./conversation-context";
 import { ConversationThread } from "./conversation-thread";
 import { OperatorVoiceControls } from "./operator-voice-controls";
+import { AuthGate } from "./auth-gate";
 import { api, ApiError, type Bootstrap, duration, ErrorNotice, readableError, sessionStatus, Spinner, type WorkspaceView } from "./workspace-ui";
 import { BrandMark as Logo } from "./brand-mark";
 
@@ -73,6 +74,10 @@ export function VoiceWorkspace() {
   const detailRef = useRef<SessionDetail | null>(null);
   const mountedRef = useRef(true);
   const stopCallRef = useRef<() => void>(() => {});
+  const callStartingRef = useRef(false);
+  const presenceQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const presenceSendRef = useRef<((active: boolean) => void) | null>(null);
+  const presencePhaseRef = useRef<PresencePhase>("processing");
   const playbackMeter = usePlaybackMeter();
   const voiceCall = useVoiceCall({
     paused: phase !== null || playingTurnId !== null || audioLoadingId !== null || loadingSession || operatorBusy || view !== "conversation" || helpOpen || !authenticated,
@@ -80,6 +85,27 @@ export function VoiceWorkspace() {
     onError: err => { stopVoiceCall(); setError(readableError(err)); },
   });
   stopCallRef.current = stopVoiceCall;
+  presencePhaseRef.current = playingTurnId ? "replying" : phase || voiceCall.status !== "listening" && voiceCall.status !== "speaking" ? "processing" : "listening";
+
+  useEffect(() => {
+    if (!authenticated || bootstrap?.viewer.role !== "participant" || !voiceCall.active || !detail?.session.id || detail.session.state.status !== "active" || view !== "conversation") return;
+    const sessionId = detail.session.id;
+    let stopped = false;
+    const send = (active: boolean) => {
+      const currentPhase = presencePhaseRef.current;
+      // Preserve send order so an older active heartbeat cannot normally arrive
+      // after the stop notification. Missed cleanup expires on the server.
+      presenceQueueRef.current = presenceQueueRef.current.catch(() => {}).then(async () => {
+        if (active && (stopped || document.visibilityState !== "visible")) return;
+        await api(`/api/sessions/${sessionId}/presence`, { method: "POST", body: JSON.stringify({ active, phase: currentPhase }), keepalive: true, signal: AbortSignal.timeout(4_000) });
+      }).catch(() => {});
+    };
+    presenceSendRef.current = send;
+    send(true);
+    const heartbeat = setInterval(() => send(true), 5_000);
+    return () => { stopped = true; clearInterval(heartbeat); if (presenceSendRef.current === send) presenceSendRef.current = null; send(false); };
+  }, [authenticated, bootstrap?.viewer.role, voiceCall.active, detail?.session.id, detail?.session.state.status, view]);
+  useEffect(() => { presenceSendRef.current?.(true); }, [phase, playingTurnId, voiceCall.status]);
 
   useEffect(() => {
     const applyPreference = () => {
@@ -235,6 +261,7 @@ export function VoiceWorkspace() {
   }
 
   function stopVoiceCall() {
+    presenceSendRef.current?.(false);
     voiceGenerationRef.current += 1;
     transcribeAbortRef.current?.abort(); transcribeAbortRef.current = null;
     voiceCall.stop();
@@ -286,13 +313,21 @@ export function VoiceWorkspace() {
   }
 
   async function startVoiceCall() {
-    if (phase || submittingRef.current || loadingSession || operatorBusy || voiceCall.active || detailRef.current?.session.state.status === "closed" || detailRef.current?.session.state.status === "handoff") return;
+    if (callStartingRef.current || phase || submittingRef.current || loadingSession || operatorBusy || voiceCall.active || detailRef.current?.session.state.status === "closed" || detailRef.current?.session.state.status === "handoff") return;
+    callStartingRef.current = true;
     stopAudio(); setError(null);
     prepareAudioGesture();
-    voiceGenerationRef.current += 1;
+    const generation = ++voiceGenerationRef.current;
     autoSpeakRef.current = true; setAutoSpeak(true);
     setTranscriptExpanded(false);
-    await voiceCall.start();
+    setLoadingSession(true);
+    try {
+      const session = await ensureSession();
+      if (!mountedRef.current || generation !== voiceGenerationRef.current || document.visibilityState !== "visible" || detailRef.current?.session.id !== session.session.id || detailRef.current.session.state.status !== "active") return;
+      setLoadingSession(false);
+      await voiceCall.start();
+    } catch (err) { if (generation === voiceGenerationRef.current) handleError(err); }
+    finally { callStartingRef.current = false; if (mountedRef.current) setLoadingSession(false); }
   }
 
   function handleError(err: unknown) {
@@ -477,7 +512,7 @@ export function VoiceWorkspace() {
   }
 
   if (booting) return <main className="boot-screen"><Logo /><Spinner label="Подключаем рабочее пространство…" /></main>;
-  if (!authenticated) return <Login onSuccess={initialize} initialError={error} theme={theme} onToggleTheme={toggleTheme} />;
+  if (!authenticated) return <AuthGate onSuccess={initialize} initialError={error} theme={theme} onToggleTheme={toggleTheme} />;
   if (!bootstrap) return <main className="boot-screen"><Logo /><ErrorNotice message={error || "Не удалось загрузить рабочее пространство."} /><button className="button button-primary" onClick={() => void initialize()}><RefreshCw size={16} />Повторить подключение</button><button className="button button-ghost" onClick={() => void logout()}>Выйти</button></main>;
 
   const busy = phase !== null || loadingSession || operatorBusy;
@@ -556,17 +591,4 @@ function Stat({ label, value, icon, note }: { label: string; value: string | num
 
 function ThemeToggle({ theme, onToggle, className = "" }: { theme: "light" | "dark"; onToggle: () => void; className?: string }) {
   return <button className={`button button-secondary theme-toggle ${className}`} onClick={onToggle} title={theme === "dark" ? "Включить светлую тему" : "Включить тёмную тему"}>{theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}{theme === "dark" ? "Светлая тема" : "Тёмная тема"}</button>;
-}
-
-function Login({ onSuccess, initialError, theme, onToggleTheme }: { onSuccess: () => Promise<void>; initialError: string | null; theme: "light" | "dark"; onToggleTheme: () => void }) {
-  const [code, setCode] = useState("");
-  const [role, setRole] = useState<Role>("participant");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(initialError);
-  async function submit(event: React.FormEvent) {
-    event.preventDefault(); if (!code.trim() || busy) return;
-    setBusy(true); setError(null);
-    try { await api("/api/auth", { method: "POST", body: JSON.stringify({ code: code.trim(), role }) }); setCode(""); await onSuccess(); } catch (err) { setError(readableError(err)); } finally { setBusy(false); }
-  }
-  return <main className="login-page"><ThemeToggle theme={theme} onToggle={onToggleTheme} className="login-theme-toggle" /><section className="login-story"><div className="login-story-main"><span className="login-eyebrow"><span />VOICE OPERATIONS PLATFORM</span><h1>Слышать запрос.<br />Понимать контекст.<br /><span>Находить решение.</span></h1><p>Гибридный голосовой маршрутизатор.<br />Говорите на удобном вам языке.</p><div className="login-flow"><span><Mic size={19} />Голос</span><i /><span><GitBranch size={19} />Сценарий</span><i /><span><Check size={19} />Действие</span></div></div><div className="login-story-footer"><span>DIR ECHOES</span><span>VOICE ROUTER / 01</span></div></section><section className="login-form-side"><div className="login-card"><Logo size={64} /><span className="section-eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span><h2>{role === "supervisor" ? "Рабочее место супервизора" : "Разговор с ассистентом"}</h2><p>{role === "supervisor" ? "Все диалоги, контроль AI и подключение к клиенту своим голосом." : "Задайте вопрос голосом или текстом. При необходимости подключится человек."}</p><form onSubmit={submit}><fieldset className="login-role"><legend>Выберите, как войти</legend><button type="button" className={role === "participant" ? "selected" : ""} aria-pressed={role === "participant"} onClick={() => setRole("participant")} disabled={busy}><MessageSquare size={16} />Клиент</button><button type="button" className={role === "supervisor" ? "selected" : ""} aria-pressed={role === "supervisor"} onClick={() => setRole("supervisor")} disabled={busy}><Headphones size={16} />Супервизор</button></fieldset><label htmlFor="access-code">Код доступа</label><div className="login-code"><LockKeyhole size={17} /><input id="access-code" type="password" autoComplete="current-password" placeholder="Введите выданный код" value={code} onChange={e => setCode(e.target.value)} disabled={busy} required maxLength={200} /></div>{error && <ErrorNotice message={error} onDismiss={() => setError(null)} />}<button className="button button-primary login-submit" type="submit" disabled={!code.trim() || busy}>{busy ? <Spinner label="Подключаемся…" /> : <>Войти в рабочее пространство<ArrowRight size={17} /></>}</button></form><div className="login-privacy"><ShieldCheck size={17} /><span>Доступ по коду. История разговоров<br />сохраняется в вашем пространстве.<br />Используйте данные кейса. Не вводите и не произносите реальные персональные данные.</span></div></div><div className="login-bottom">DIR ECHOES <span>Говорите на удобном вам языке</span></div></section></main>;
 }

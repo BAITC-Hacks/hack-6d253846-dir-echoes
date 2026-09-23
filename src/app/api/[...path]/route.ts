@@ -15,6 +15,7 @@ import { recordErrorEvent, type ErrorStage } from "@/lib/error-events";
 import { getOperatorVoice, updateOperatorVoice, operatorVoiceCommandSchema } from "@/lib/operator-rtc";
 import { getSpeechProfile } from "@/lib/speech-profile";
 import type { Trace } from "@/lib/types";
+import { updateSessionPresence } from "@/lib/presence";
 
 export const runtime="nodejs";
 export const maxDuration=60;
@@ -65,6 +66,10 @@ async function handle(request:Request,context:Context):Promise<Response>{
   }
   if(path[0]==="sessions"){
     const id=path[1];
+    if(id && path[2]==="presence" && path.length===3 && method==="POST") {
+      const data=await body(request,z.object({active:z.boolean(),phase:z.enum(["listening","processing","replying"])}),1024);
+      return json(await updateSessionPresence(id,user,data));
+    }
     if(id && path[2]==="voice" && path.length===3) {
       if(method==="GET") return json(await getOperatorVoice(id,user));
       if(method==="POST") return json(await updateOperatorVoice(id,user,await body(request,operatorVoiceCommandSchema,24_000)));

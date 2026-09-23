@@ -243,15 +243,25 @@ async function executeDomainTurn(input: ExecuteInput): Promise<ExecuteOutput> {
   const ranked = [...candidates].sort((a, b) => Number(dataset.scenarios.find(s => s.scenario_id === b.scenarioId)?.priority === "urgent") - Number(dataset.scenarios.find(s => s.scenario_id === a.scenarioId)?.priority === "urgent"));
   const primary = ranked[0];
   const directOperatorRequest = primary?.scenarioId === "SC37" && primary.confidence >= 0.75 && !decision.clarification && !decision.alternatives.length
-    && (!requiresReviewedConsent || (decision.confirmation === "none" && !decision.isContinuation));
+    && decision.utteranceKind === "request" && !decision.isContinuation && decision.confirmation === "none";
   const urgentGuidance = (scenarioId?: string) => scenarioId === "SC11"
     ? text("Если есть пострадавшие, сразу звоните сто двенадцать. ", "Зардап шеккендер болса, бірден жүз он екіге қоңырау шалыңыз. ")
     : scenarioId === "SC38" ? text("Никому не сообщайте SMS-коды, CVV и PIN. ", "Ешкімге SMS кодын, CVV және PIN айтпаңыз. ") : "";
-  // Social contact is not an unsuccessful business request and cannot authorize,
-  // cancel or replace a pending operation. The router supplies this semantic label.
+  // Social contact cannot authorize an operation. Re-present the saved terms only
+  // in the same reviewed language; changing language invalidates consent, while
+  // retaining the active business request and its slots for a fresh preview.
   if (decision.utteranceKind === "greeting" && primary?.scenarioId === "SYS_UNCLEAR" && !Object.keys(decision.slots).length && decision.confirmation === "none") {
     state.unclearCount = 0;
     output.facts = { social_contact: true };
+    if (state.pendingConfirmation) {
+      const sameReviewedLanguage = !requiresReviewedConsent && JSON.stringify(stateLanguages(input.state)) === JSON.stringify(stateLanguages(state));
+      if (sameReviewedLanguage) {
+        output.facts.confirmation_required = true;
+        output.reply = `${text("Я на связи.", "Мен байланыстамын.", "Я на связи, тыңдап тұрмын.", "Buradayım.")} ${state.pendingConfirmation.summary}. ${text("Подтверждаете?", "Растайсыз ба?", "Растайсыз ба? Ответьте «да» или «нет».", "Onaylıyor musunuz?")}`;
+        return output;
+      }
+      state.pendingConfirmation = null;
+    }
     output.reply = text("Здравствуйте, я на связи. Расскажите, чем помочь по страховке.", "Сәлеметсіз бе, мен байланыстамын. Сақтандыру бойынша қалай көмектесе аламын?", "Здравствуйте, мен байланыстамын. Сақтандыру бойынша чем помочь?", "Merhaba, buradayım. Sigortayla ilgili nasıl yardımcı olabilirim?");
     return output;
   }

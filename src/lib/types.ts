@@ -57,7 +57,9 @@ export type Trace = {
   source: "llm" | "confirmation" | "slot" | "catalog_example" | "social" | "operator"; warnings: string[];
 };
 export type Turn = { id: string; sessionId: string; requestId: string; userText: string; assistantText: string; createdAt: string; trace: Trace; mode: "text" | "voice" | "operator" };
-export type Session = { id: string; title: string; createdAt: string; updatedAt: string; state: DialogueState; version: number; turnCount: number };
+export type PresencePhase = "listening" | "processing" | "replying";
+export type SessionLive = { active: true; phase: PresencePhase; lastSeenAt: string; expiresAt: string };
+export type Session = { id: string; title: string; createdAt: string; updatedAt: string; state: DialogueState; version: number; turnCount: number; live?: SessionLive | null };
 export type SessionDetail = { session: Session; turns: Turn[]; handoffs?: Handoff[] };
 export type Handoff = { id: string; sessionId: string; queue: string; reason: string; summary: string; status: "waiting" | "active" | "closed"; createdAt: string; updatedAt: string };
 export type ChatEntry = { role: "user" | "assistant"; content: string };
