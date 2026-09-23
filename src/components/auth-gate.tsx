@@ -35,7 +35,7 @@ export function AuthGate({ onSuccess, initialError, theme, onToggleTheme }: {
     <div className={styles.layout}>
       <section className={styles.story} aria-labelledby="welcome-title">
         <span className={styles.eyebrow}><i />ГОЛОСОВОЙ КОНТАКТ-ЦЕНТР</span>
-        <h1 id="welcome-title" className={styles.headline}>Разговор,<br />который ведёт<br /><em>к решению.</em></h1>
+        <h1 id="welcome-title" className={styles.headline}>Разговор, <br />который ведёт<br /><em>к решению.</em></h1>
         <p className={styles.description}>Расскажите о своём вопросе.<br />Ассистент сохранит контекст, а человек<br className={styles.desktopBreak} /> подключится, когда это нужно.</p>
         <div className={styles.signature} aria-hidden="true"><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /></div>
         <div className={styles.storyNote}><ShieldCheck size={17} /><span>Действия — только с вашего согласия.</span></div>
